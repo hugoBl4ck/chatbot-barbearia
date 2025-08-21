@@ -25,7 +25,6 @@ app.post("/webhook", async (request, response) => {
             const result = await handleScheduling(personName, dateParam, timeParam);
             
             const currentSession = request.body.session;
-            // A conversa só termina se o agendamento for um sucesso.
             const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
             responsePayload = createResponse(result.message, context);
 
@@ -57,14 +56,18 @@ function createResponse(text, context = null) {
     return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E ROBUSTA) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E SEGURA) ---
 async function handleScheduling(name, dateParam, timeParam) {
-    // Agora o nosso código verifica se os parâmetros estão faltando
-    if (!dateParam || !timeParam || !dateParam.start || !timeParam.start) {
-        return { success: false, message: "Por favor, informe um dia e um horário completos." };
+    // Lógica de extração de data/hora a prova de falhas
+    let dateTimeString;
+    try {
+        const dateValue = dateParam.start || dateParam;
+        const timeValue = timeParam.start || timeParam;
+        dateTimeString = `${dateValue.split('T')[0]}T${timeValue.split('T')[1]}`;
+    } catch (e) {
+        return { success: false, message: "Não consegui entender a data e a hora. Por favor, tente um formato como 'amanhã às 10h'." };
     }
 
-    const dateTimeString = `${dateParam.start.split('T')[0]}T${timeParam.start.split('T')[1]}`;
     const requestedDate = new Date(dateTimeString);
 
     if (isNaN(requestedDate.getTime())) {
