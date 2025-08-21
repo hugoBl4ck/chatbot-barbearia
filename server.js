@@ -105,36 +105,73 @@ function validateDateTime(dateParam, timeParam, originalQuery = '') {
 }
 
 function extractFromQuery(query) {
-    console.log('Extraindo da query:', query);
+    console.log('=== EXTRAINDO DA QUERY ===');
+    console.log('Query completa:', query);
     
     const result = { date: null, time: null };
-    const queryLower = query.toLowerCase();
+    const queryLower = query.toLowerCase().trim();
     
-    // Extrair data
-    if (queryLower.includes('hoje')) {
-        result.date = 'hoje';
-    } else if (queryLower.includes('amanhã') || queryLower.includes('amanha')) {
-        result.date = 'amanhã';
-    } else if (queryLower.includes('segunda')) {
-        result.date = 'segunda-feira';
-    } else if (queryLower.includes('terça') || queryLower.includes('terca')) {
-        result.date = 'terça-feira';
-    } else if (queryLower.includes('quarta')) {
-        result.date = 'quarta-feira';
-    } else if (queryLower.includes('quinta')) {
-        result.date = 'quinta-feira';
-    } else if (queryLower.includes('sexta')) {
-        result.date = 'sexta-feira';
-    } else if (queryLower.includes('sábado') || queryLower.includes('sabado')) {
-        result.date = 'sábado';
+    // Padrões completos primeiro - casos como "amanhã às 9h", "hoje às 14:00"
+    const fullPatterns = [
+        // Padrão: "amanhã às 9h"
+        /(hoje|amanhã|amanha|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado)(?:-feira)?\s+(?:às?|as)\s+(\d{1,2})h?(\d{2})?/,
+        // Padrão: "amanhã às 14:00"  
+        /(hoje|amanhã|amanha|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado)(?:-feira)?\s+(?:às?|as)\s+(\d{1,2}):(\d{2})/,
+        // Padrão: "segunda às 3 da tarde"
+        /(hoje|amanhã|amanha|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado)(?:-feira)?\s+(?:às?|as)\s+(\d{1,2})\s+da\s+(manhã|manha|tarde|noite)/
+    ];
+    
+    for (const pattern of fullPatterns) {
+        const match = queryLower.match(pattern);
+        if (match) {
+            console.log('Match encontrado:', match);
+            
+            // Extrair data
+            let dateWord = match[1];
+            if (dateWord === 'amanha') dateWord = 'amanhã';
+            result.date = dateWord;
+            
+            // Extrair hora
+            let hour = parseInt(match[2]);
+            let minute = 0;
+            
+            if (match[3] && !isNaN(match[3])) {
+                // Formato HH:MM ou HHhMM
+                minute = parseInt(match[3]);
+            } else if (match[4]) {
+                // Caso "3 da tarde"
+                const period = match[4];
+                if (period === 'tarde' && hour < 12) {
+                    hour += 12;
+                } else if (period === 'noite' && hour < 12) {
+                    hour += 12;
+                }
+            }
+            
+            result.time = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+            console.log('Resultado extração completa:', result);
+            return result;
+        }
     }
     
-    // Extrair hora - mais padrões
+    // Fallback: extrair separadamente
+    console.log('Fallback: extração separada');
+    
+    // Extrair data
+    const dateWords = ['hoje', 'amanhã', 'amanha', 'segunda', 'terça', 'terca', 'quarta', 'quinta', 'sexta', 'sábado', 'sabado'];
+    for (const word of dateWords) {
+        if (queryLower.includes(word)) {
+            result.date = word === 'amanha' ? 'amanhã' : word;
+            break;
+        }
+    }
+    
+    // Extrair hora
     const hourPatterns = [
-        /(\d{1,2})h(\d{2})?/,  // 9h, 9h30
-        /(\d{1,2}):(\d{2})/,   // 9:00, 14:30
-        /(\d{1,2}) horas?/,    // 9 horas
-        /às (\d{1,2})/,        // às 9
+        /(\d{1,2}):(\d{2})/,           // 14:00
+        /(\d{1,2})h(\d{2})?/,          // 9h, 9h30
+        /(\d{1,2})\s*horas?/,          // 9 horas
+        /às?\s+(\d{1,2})/,             // às 9
     ];
     
     for (const pattern of hourPatterns) {
@@ -147,19 +184,18 @@ function extractFromQuery(query) {
         }
     }
     
-    // Casos especiais
-    if (queryLower.includes('manhã') || queryLower.includes('manha')) {
-        if (!result.time) result.time = '09:00';
-    }
-    if (queryLower.includes('tarde')) {
-        if (queryLower.includes('3') || queryLower.includes('três')) {
-            result.time = '15:00';
-        } else if (!result.time) {
+    // Casos especiais de período
+    if (!result.time) {
+        if (queryLower.includes('manhã') || queryLower.includes('manha')) {
+            result.time = '09:00';
+        } else if (queryLower.includes('tarde')) {
             result.time = '14:00';
+        } else if (queryLower.includes('noite')) {
+            result.time = '19:00';
         }
     }
     
-    console.log('Resultado extração:', result);
+    console.log('Resultado final extração:', result);
     return result;
 }
 
@@ -483,7 +519,7 @@ function createResponse(text, context = null, suggestions = []) {
 }
 
 // --- FUNÇÃO PRINCIPAL DE AGENDAMENTO ---
-async function handleScheduling(name, dateParam, timeParam) {
+async function handleScheduling(name, dateParam, timeParam, request) {
     try {
         // === LOGS DE DEBUG ===
         console.log('\n=== DEBUG AGENDAMENTO ===');
@@ -495,7 +531,10 @@ async function handleScheduling(name, dateParam, timeParam) {
         
         // 1. Validar entrada
         const originalQuery = request.body.queryResult?.queryText || '';
+        console.log('Query original:', originalQuery);
+        
         const dateTimeValidation = validateDateTime(dateParam, timeParam, originalQuery);
+        console.log('Resultado validação:', dateTimeValidation);
         if (!dateTimeValidation.valid) {
             return { 
                 success: false, 
@@ -634,7 +673,7 @@ app.post("/webhook", async (request, response) => {
             const timeParam = request.body.queryResult.parameters.hora;
             const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
             
-            const result = await handleScheduling(personName, dateParam, timeParam);
+            const result = await handleScheduling(personName, dateParam, timeParam, request);
             
             const currentSession = request.body.session;
             const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
