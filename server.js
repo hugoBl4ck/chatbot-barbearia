@@ -9,7 +9,7 @@ app.use(express.json());
 const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 const sheetId = process.env.SHEET_ID;
 const doc = new GoogleSpreadsheet(sheetId);
-const TIMEZONE = 'America/Sao_Paulo'; // Define o fuso horário padrão
+const TIMEZONE = 'America/Sao_Paulo';
 
 // Função principal do webhook
 app.post("/webhook", async (request, response) => {
@@ -25,10 +25,8 @@ app.post("/webhook", async (request, response) => {
       const result = await handleScheduling(personName, dateParam, timeParam);
       
       if (result.success) {
-        // Se o agendamento deu certo, a conversa prossegue
-        responsePayload = createResponse(result.message, true); // endInteraction = true
+        responsePayload = createResponse(result.message, true);
       } else {
-        // Se deu erro (horário inválido/ocupado), mantém a conversa viva
         const currentSession = request.body.session;
         responsePayload = createResponse(result.message, false, `${currentSession}/contexts/aguardando_agendamento`);
       }
@@ -52,7 +50,6 @@ function getPersonName(contexts) {
   return contextWithName ? contextWithName.parameters["person.original"] : null;
 }
 
-// Função de resposta atualizada para gerenciar contextos
 function createResponse(text, endInteraction = false, context = null) {
   const payload = {
     fulfillmentMessages: [{ text: { text: [text] } }]
@@ -66,21 +63,27 @@ function createResponse(text, endInteraction = false, context = null) {
   return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (ATUALIZADA) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM A CORREÇÃO) ---
 async function handleScheduling(name, dateParam, timeParam) {
   if (!dateParam || !timeParam) {
     return { success: false, message: "Por favor, informe uma data e hora completas." };
   }
 
-  // --- CORREÇÃO DO FUSO HORÁRIO ---
-  // Combina data e hora, mas FORÇA a interpretação no fuso horário correto
-  const dateISO = dateParam.split('T')[0];
-  const timeISO = timeParam.split('T')[1];
-  const requestedDateTimeString = `${dateISO}T${timeISO}`;
+  // ***** A CORREÇÃO DEFINITIVA ESTÁ AQUI *****
+  // O Dialogflow envia objetos. Precisamos extrair a string de dentro deles.
+  // A string de data/hora vem no formato "2025-08-22T12:00:00-03:00".
+  const dateString = dateParam.start ? dateParam.start.split('T')[0] : dateParam.split('T')[0];
+  const timeString = timeParam.start ? timeParam.start.split('T')[1] : timeParam.split('T')[1];
+
+  if (!dateString || !timeString) {
+      return { success: false, message: "Não consegui extrair a data ou a hora da sua resposta. Tente de novo." };
+  }
   
-  // No JavaScript, new Date() usa o fuso do servidor.
-  // Criamos a data em UTC e depois ajustamos para nosso fuso.
-  const requestedDate = new Date(requestedDateTimeString.replace(/-/g, '/').replace('T', ' '));
+  // Combina a parte da data com a parte da hora para formar uma data completa e válida
+  const requestedDateTimeString = `${dateString}T${timeString}`;
+  
+  const requestedDate = new Date(requestedDateTimeString);
+  
   if (isNaN(requestedDate.getTime())) {
     return { success: false, message: "A data e hora que você informou não são válidas." };
   }
