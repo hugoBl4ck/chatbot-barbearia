@@ -82,46 +82,41 @@ async function handleScheduling(name, dateParam, timeParam) {
             throw new Error("Data inválida");
         }
         
-        // **CORREÇÃO: Usar Intl.DateTimeFormat para obter componentes no fuso correto**
-        const formatter = new Intl.DateTimeFormat('pt-BR', {
+        // **CORREÇÃO: Obter dia da semana no fuso horário correto**
+        // Criar uma data no fuso horário de São Paulo
+        const options = { timeZone: TIMEZONE, weekday: 'long' };
+        const dayName = new Intl.DateTimeFormat('pt-BR', options).format(requestedDateUTC);
+        
+        // Mapear nome do dia para número (1=Segunda, 2=Terça, ..., 6=Sábado)
+        const dayMap = {
+            'segunda': 1, 'terça': 2, 'quarta': 3, 'quinta': 4, 'sexta': 5, 'sábado': 6
+        };
+        const dayOfWeek = dayMap[dayName.toLowerCase()];
+        
+        // Se for domingo, retornar erro (não está na planilha)
+        if (dayOfWeek === undefined) {
+            return { success: false, message: `Desculpe, não funcionamos aos domingos.` };
+        }
+        
+        // **CORREÇÃO: Obter hora e minuto no fuso horário correto**
+        const timeFormatter = new Intl.DateTimeFormat('pt-BR', {
             timeZone: TIMEZONE,
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
             hour: '2-digit',
             minute: '2-digit',
             hour12: false
         });
         
-        // Formatar a data no fuso horário correto
-        const formattedParts = formatter.formatToParts(requestedDateUTC);
-        
-        // Extrair componentes da data
-        const components = {};
-        formattedParts.forEach(part => {
-            components[part.type] = part.value;
-        });
-        
-        // **CORREÇÃO: Calcular o dia da semana corretamente**
-        // Criar uma data usando os componentes locais
-        const localDate = new Date(
-            parseInt(components.year),
-            parseInt(components.month) - 1, // Mês é 0-11 em JavaScript
-            parseInt(components.day),
-            parseInt(components.hour),
-            parseInt(components.minute)
-        );
-        
-        const dayOfWeek = localDate.getDay(); // 0=domingo, 1=segunda, etc.
-        const hours = parseInt(components.hour);
-        const minutes = parseInt(components.minute);
+        const timeParts = timeFormatter.formatToParts(requestedDateUTC);
+        const hourPart = timeParts.find(part => part.type === 'hour').value;
+        const minutePart = timeParts.find(part => part.type === 'minute').value;
+        const hours = parseInt(hourPart);
+        const minutes = parseInt(minutePart);
         const requestedTime = hours + minutes / 60;
         
         // Log para depuração
-        console.log(`Data agendada: ${components.day}/${components.month}/${components.year}`);
-        console.log(`Hora agendada: ${components.hour}:${components.minute}`);
-        console.log(`Dia da semana: ${dayOfWeek} (0=Dom, 1=Seg, ..., 6=Sáb)`);
-        console.log(`Hora decimal: ${requestedTime}`);
+        console.log(`Data agendada: ${requestedDateUTC.toISOString()}`);
+        console.log(`Dia da semana: ${dayName} (${dayOfWeek})`);
+        console.log(`Hora agendada: ${hours}:${minutes} (${requestedTime})`);
         
         // Carregar documento e planilhas
         const doc = await getDoc();
@@ -138,26 +133,38 @@ async function handleScheduling(name, dateParam, timeParam) {
         // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
         const configRows = await configSheet.getRows();
         
-        // **CORREÇÃO: Garantir comparação numérica**
+        // **CORREÇÃO: Buscar dia da semana corretamente**
         const dayConfig = configRows.find(row => parseInt(row.DiaDaSemana) === dayOfWeek);
-        const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(requestedDateUTC);
         
-        if (!dayConfig || !dayConfig.InicioManha) {
+        if (!dayConfig) {
             return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
         }
         
-        // Converter horários para números decimais
-        const inicioManha = parseFloat(dayConfig.InicioManha.replace(':', '.'));
-        const fimManha = parseFloat(dayConfig.FimManha.replace(':', '.'));
-        const inicioTarde = dayConfig.InicioTarde ? parseFloat(dayConfig.InicioTarde.replace(':', '.')) : null;
-        const fimTarde = dayConfig.FimTarde ? parseFloat(dayConfig.FimTarde.replace(':', '.')) : null;
+        // **CORREÇÃO: Converter horários com tratamento robusto**
+        const parseTime = (timeStr) => {
+            if (!timeStr) return null;
+            const parts = timeStr.split(':');
+            if (parts.length !== 2) return null;
+            const hours = parseInt(parts[0]);
+            const minutes = parseInt(parts[1]);
+            return hours + minutes / 60;
+        };
+        
+        const inicioManha = parseTime(dayConfig.InicioManha);
+        const fimManha = parseTime(dayConfig.FimManha);
+        const inicioTarde = parseTime(dayConfig.InicioTarde);
+        const fimTarde = parseTime(dayConfig.FimTarde);
+        
+        console.log(`Horários de funcionamento: Manhã(${inicioManha}-${fimManha}) Tarde(${inicioTarde}-${fimTarde})`);
         
         // Verificar se o horário está dentro do período de funcionamento
-        const isMorningValid = (requestedTime >= inicioManha && requestedTime < fimManha);
-        const isAfternoonValid = (inicioTarde && requestedTime >= inicioTarde && requestedTime < fimTarde);
+        const isMorningValid = inicioManha !== null && fimManha !== null && 
+                              requestedTime >= inicioManha && requestedTime < fimManha;
+        const isAfternoonValid = inicioTarde !== null && fimTarde !== null && 
+                                requestedTime >= inicioTarde && requestedTime < fimTarde;
         
         if (!isMorningValid && !isAfternoonValid) {
-            console.log(`Horário fora do funcionamento: Manhã(${inicioManha}-${fimManha}) Tarde(${inicioTarde}-${fimTarde})`);
+            console.log(`Horário fora do funcionamento: ${requestedTime} não está em [${inicioManha}, ${fimManha}) nem [${inicioTarde}, ${fimTarde})`);
             return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
         }
         
@@ -201,5 +208,5 @@ async function handleScheduling(name, dateParam, timeParam) {
 
 // Inicia o servidor
 const listener = app.listen(process.env.PORT, () => {
-    console.log("Your app is listening on port " + listener.address().port);
+    console.log("Your app é listening on port " + listener.address().port);
 });
