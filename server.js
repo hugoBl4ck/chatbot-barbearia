@@ -13,11 +13,9 @@ app.post("/webhook", async (request, response) => {
   if (intent === "AgendarHorario") {
     const dateTime = request.body.queryResult.parameters["date-time"];
     
-    // Tenta extrair o nome do contexto. Se não encontrar, usa "Cliente" como padrão.
     let personName = "Cliente";
     const outputContexts = request.body.queryResult.outputContexts;
     if (outputContexts && outputContexts.length > 0) {
-      // Procura o contexto que contém o parâmetro 'person.original'
       const contextWithName = outputContexts.find(ctx => ctx.parameters && ctx.parameters["person.original"]);
       if (contextWithName) {
         personName = contextWithName.parameters["person.original"];
@@ -37,7 +35,7 @@ app.post("/webhook", async (request, response) => {
 });
 
 
-// --- FUNÇÃO PARA SALVAR NA PLANILHA ---
+// --- FUNÇÃO PARA SALVAR NA PLANILHA (VERSÃO MAIS SEGURA) ---
 async function saveToSheet(name, dateTime) {
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const sheetId = process.env.SHEET_ID;
@@ -48,13 +46,19 @@ async function saveToSheet(name, dateTime) {
   
   const sheet = doc.sheetsByIndex[0];
 
-  // ***** A CORREÇÃO ESTÁ AQUI *****
-  // Verifica se 'dateTime' é um objeto com a propriedade 'start'. Se for, usa o valor de 'start'.
-  // Se não, usa o próprio 'dateTime' (que deve ser uma string).
   const dateString = (typeof dateTime === 'object' && dateTime.start) ? dateTime.start : dateTime;
   
-  // Usa a 'dateString' corrigida para criar o objeto de Data.
+  // VERIFICAÇÃO DE SEGURANÇA 1: Garante que temos uma string de data para processar.
+  if (!dateString) {
+      throw new Error("O valor de 'date-time' recebido do Dialogflow está vazio.");
+  }
+
   const dateObj = new Date(dateString);
+  
+  // VERIFICAÇÃO DE SEGURANÇA 2: Garante que a data criada é válida.
+  if (isNaN(dateObj.getTime())) {
+    throw new Error(`O valor '${dateString}' não pôde ser convertido para uma data válida.`);
+  }
   
   const options = {
       year: 'numeric', month: 'long', day: 'numeric',
