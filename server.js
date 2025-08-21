@@ -9,7 +9,7 @@ app.use(express.json());
 const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 const sheetId = process.env.SHEET_ID;
 const doc = new GoogleSpreadsheet(sheetId);
-const TIMEZONE = 'America/Sao_Paulo';
+const TIMEZONE = 'America/Sao_Paulo'; // Fuso horário oficial do Brasil
 
 // Função principal do webhook
 app.post("/webhook", async (request, response) => {
@@ -25,10 +25,10 @@ app.post("/webhook", async (request, response) => {
       const result = await handleScheduling(personName, dateParam, timeParam);
       
       if (result.success) {
-        responsePayload = createResponse(result.message, true);
+        responsePayload = createResponse(result.message);
       } else {
         const currentSession = request.body.session;
-        responsePayload = createResponse(result.message, false, `${currentSession}/contexts/aguardando_agendamento`);
+        responsePayload = createResponse(result.message, `${currentSession}/contexts/aguardando_agendamento`);
       }
 
     } catch (error) {
@@ -50,38 +50,31 @@ function getPersonName(contexts) {
   return contextWithName ? contextWithName.parameters["person.original"] : null;
 }
 
-function createResponse(text, endInteraction = false, context = null) {
+function createResponse(text, context = null) {
   const payload = {
     fulfillmentMessages: [{ text: { text: [text] } }]
   };
-  if (context && !endInteraction) {
-    payload.outputContexts = [{
-        name: context,
-        lifespanCount: 2
-    }];
+  if (context) {
+    payload.outputContexts = [{ name: context, lifespanCount: 2 }];
   }
   return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM A CORREÇÃO) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM CORREÇÃO DE TIMEZONE) ---
 async function handleScheduling(name, dateParam, timeParam) {
   if (!dateParam || !timeParam) {
     return { success: false, message: "Por favor, informe uma data e hora completas." };
   }
 
-  // ***** A CORREÇÃO DEFINITIVA ESTÁ AQUI *****
-  // O Dialogflow envia objetos. Precisamos extrair a string de dentro deles.
-  // A string de data/hora vem no formato "2025-08-22T12:00:00-03:00".
+  // Extrai a string de data/hora de dentro dos objetos do Dialogflow
   const dateString = dateParam.start ? dateParam.start.split('T')[0] : dateParam.split('T')[0];
   const timeString = timeParam.start ? timeParam.start.split('T')[1] : timeParam.split('T')[1];
 
   if (!dateString || !timeString) {
-      return { success: false, message: "Não consegui extrair a data ou a hora da sua resposta. Tente de novo." };
+      return { success: false, message: "Não consegui extrair a data ou a hora. Tente novamente." };
   }
   
-  // Combina a parte da data com a parte da hora para formar uma data completa e válida
   const requestedDateTimeString = `${dateString}T${timeString}`;
-  
   const requestedDate = new Date(requestedDateTimeString);
   
   if (isNaN(requestedDate.getTime())) {
@@ -94,15 +87,25 @@ async function handleScheduling(name, dateParam, timeParam) {
   const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
   const configSheet = doc.sheetsByTitle['Horarios'];
   
-  // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
-  const dayOfWeek = requestedDate.getDay();
-  const requestedTime = requestedDate.getHours() + requestedDate.getMinutes() / 60;
+  // ***** CORREÇÃO DE FUSO HORÁRIO *****
+  // Usa a API Intl para extrair os componentes da data NO FUSO HORÁRIO CORRETO
+  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false });
+  const parts = formatter.formatToParts(requestedDate);
+  const getValue = (type) => parts.find(p => p.type === type).value;
   
+  let dayOfWeek = parseInt(getValue('weekday')); // Intl: Dom=7, Seg=1... Sáb=6. Nosso padrão: Dom=0...Sáb=6
+  if(dayOfWeek === 7) dayOfWeek = 0; // Converte Domingo para 0
+  
+  const hours = parseInt(getValue('hour'));
+  const minutes = parseInt(getValue('minute'));
+  const requestedTime = hours + minutes / 60;
+  
+  // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
   const configRows = await configSheet.getRows();
   const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
 
   if (!dayConfig || (!dayConfig.InicioManha && !dayConfig.InicioTarde)) {
-    const dayName = requestedDate.toLocaleDateString('pt-BR', { weekday: 'long', timeZone: TIMEZONE });
+    const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(requestedDate);
     return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
   }
   
@@ -122,9 +125,7 @@ async function handleScheduling(name, dateParam, timeParam) {
   }
   
   // 3. SALVAR AGENDAMENTO
-  const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', {
-    dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE
-  }).format(requestedDate);
+  const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
 
   await scheduleSheet.addRow({
     NomeCliente: name,
