@@ -25,6 +25,7 @@ app.post("/webhook", async (request, response) => {
         if (intent === "AgendarHorario") {
             const dateTimeParam = request.body.queryResult.parameters['date-time'];
             const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
+            console.log(`[DEBUG] Parâmetro recebido do Dialogflow:`, dateTimeParam);
             result = await handleScheduling(personName, dateTimeParam);
         } else {
             result = { success: true, message: "Webhook contatado, mas a intenção não é de agendamento." };
@@ -45,11 +46,22 @@ app.post("/webhook", async (request, response) => {
 // --- LÓGICA PRINCIPAL DE AGENDAMENTO ---
 async function handleScheduling(name, dateTimeParam) {
     if (!dateTimeParam || (typeof dateTimeParam === 'object' && !dateTimeParam.start)) {
+        console.log(`[DEBUG] Parâmetro de data/hora ausente ou inválido:`, dateTimeParam);
         return { success: false, message: "Por favor, informe uma data e hora completas." };
     }
 
     const dateTimeString = dateTimeParam.start || dateTimeParam;
-    const requestedDate = new Date(dateTimeString);
+    // Garantir que a data seja interpretada no timezone correto
+    let requestedDate = new Date(dateTimeString);
+    if (isNaN(requestedDate.getTime())) {
+        // Tenta forçar o timezone
+        try {
+            requestedDate = new Date(new Date(dateTimeString).toLocaleString("en-US", { timeZone: TIMEZONE }));
+        } catch (e) {
+            console.log(`[DEBUG] Falha ao converter data/hora:`, dateTimeString);
+        }
+    }
+    console.log(`[DEBUG] Data/hora solicitada (UTC):`, requestedDate.toISOString());
 
     if (isNaN(requestedDate.getTime())) {
         return { success: false, message: `Não consegui entender a data. Tente um formato como 'amanhã às 14:00'.` };
@@ -100,20 +112,23 @@ function validateRequest(request) {
 }
 
 async function checkBusinessHours(date, configSheet) {
-    // ESTA É A CORREÇÃO MAIS IMPORTANTE E DEFINITIVA
     // Cria uma string de data/hora formatada para o timezone correto
     const localDateTimeString = date.toLocaleString("en-CA", { timeZone: TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     // Cria um novo objeto Date a partir da string local, garantindo que não haja conversões de fuso indesejadas
     const localDate = new Date(localDateTimeString.replace(' ', 'T').split(',')[0]);
-    
+    console.log(`[DEBUG] Data/hora local para verificação de horário comercial:`, localDate);
+
     const dayOfWeek = localDate.getDay(); // 0=Dom, 1=Seg...
     const requestedTime = localDate.getHours() + localDate.getMinutes() / 60;
-    
+
     const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(date);
     const configRows = await configSheet.getRows();
     const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
 
-    if (!dayConfig || !dayConfig.InicioManha) return { isOpen: false, dayName };
+    if (!dayConfig || !dayConfig.InicioManha) {
+        console.log(`[DEBUG] Dia não encontrado ou sem horário configurado:`, dayOfWeek, dayConfig);
+        return { isOpen: false, dayName };
+    }
 
     const timeToDecimal = (str) => {
         if (!str || typeof str !== 'string') return 0;
