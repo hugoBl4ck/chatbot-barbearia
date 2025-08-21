@@ -35,7 +35,6 @@ app.post("/webhook", async (request, response) => {
                 responsePayload = createResponse(result.message, `${currentSession}/contexts/aguardando_agendamento`);
             }
         } else {
-            // Adicione aqui a lógica para a intent "VerificarDisponibilidade" se desejar
             responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
         }
     } catch (error) {
@@ -63,7 +62,7 @@ function createResponse(text, context = null) {
     return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E CORRIGIDA) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO DE DEPURAÇÃO) ---
 async function handleScheduling(name, dateParam, timeParam) {
     if (!dateParam || !timeParam) {
         return { success: false, message: "Por favor, informe uma data e hora completas." };
@@ -76,50 +75,52 @@ async function handleScheduling(name, dateParam, timeParam) {
         return { success: false, message: "A data e hora que você informou não são válidas." };
     }
     
-    const timePart = dateTimeString.split('T')[1];
-    const [hours, minutes] = timePart.split(':').map(Number);
-    const requestedTime = hours + minutes / 60;
-    const dayOfWeek = requestedDate.getUTCDay();
-    
     const doc = getDoc();
     await doc.useServiceAccountAuth(creds);
     await doc.loadInfo();
 
     const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
-    const configSheet = doc.sheetsByTitle['Horarios'];
     
+    const existingAppointments = await scheduleSheet.getRows();
+    const requestedISO = requestedDate.toISOString();
+
+    const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedISO);
+
+    if (isSlotTaken) {
+        // --- RESPOSTA DE DEPURAÇÃO ---
+        const bookedISOTimes = existingAppointments.map(appt => appt.DataHoraISO).join(', ');
+        const debugMessage = `DEBUG: Conflito detectado.\nTentativa: ${requestedISO}\nAgendamentos na planilha: [${bookedISOTimes}]`;
+        return { success: false, message: debugMessage };
+    }
+    
+    // Se o slot não estiver ocupado, o resto do código de verificação de horário de funcionamento roda
+    const timePart = dateTimeString.split('T')[1];
+    const [hours, minutes] = timePart.split(':').map(Number);
+    const dayOfWeek = requestedDate.getUTCDay();
+    
+    const configSheet = doc.sheetsByTitle['Horarios'];
     const configRows = await configSheet.getRows();
     const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
-
+    
     if (!dayConfig || (!dayConfig.InicioManha && !dayConfig.InicioTarde)) {
         const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(requestedDate);
         return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
     }
     
+    const requestedTime = hours + minutes / 60;
     const isMorningShift = requestedTime >= parseFloat(dayConfig.InicioManha.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimManha.replace(':', '.'));
     const isAfternoonShift = dayConfig.InicioTarde && requestedTime >= parseFloat(dayConfig.InicioTarde.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimTarde.replace(':', '.'));
 
     if (!isMorningShift && !isAfternoonShift) {
-        if (dayOfWeek == 6 && isMorningShift) {
-            // Horário de sábado é válido
-        } else {
-            return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
-        }
+        if (dayOfWeek == 6 && isMorningShift) { /* Sábado é válido */ } 
+        else { return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." }; }
     }
 
-    const existingAppointments = await scheduleSheet.getRows();
-    const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDate.toISOString());
-
-    if (isSlotTaken) {
-        return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
-    }
-    
     const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
 
-    // CORREÇÃO DO ERRO DE DIGITAÇÃO:
     await scheduleSheet.addRow({
         NomeCliente: name,
-        DataHoraFormatada: formattedDateForUser, // Variável correta usada aqui
+        DataHoraFormatada: formattedDateForUser,
         DataHoraISO: requestedDate.toISOString(),
         TimestampAgendamento: new Date().toISOString(),
         Status: 'Confirmado'
