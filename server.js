@@ -8,9 +8,9 @@ app.use(express.json({ limit: '10mb' }));
 // --- CONFIGURAÇÃO DA PLANILHA E CREDENCIAIS ---
 const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
 const sheetId = process.env.SHEET_ID;
-const TIMEZONE = 'America/Sao_Paulo';
+const TIMEZONE = 'America/Buenos_Aires'; // Mesmo timezone do Dialogflow (UTC-3)
 const SERVICE_DURATION_MINUTES = 30; // Duração padrão do serviço
-const TIMEZONE_OFFSET = -3; // Offset para América/São Paulo (UTC-3)
+const TIMEZONE_OFFSET = -3; // Offset para América/Buenos Aires (UTC-3 - igual São Paulo)
 
 // Cache para configurações
 let configCache = null;
@@ -49,10 +49,25 @@ function validateRequest(request) {
 }
 
 function validateDateTime(dateParam, timeParam) {
+    console.log('Validando parâmetros...');
+    console.log('dateParam:', dateParam, typeof dateParam);
+    console.log('timeParam:', timeParam, typeof timeParam);
+    
     if (!dateParam || !timeParam) {
         return { valid: false, error: "Por favor, informe uma data e hora completas." };
     }
     
+    // Se chegarem como string (texto), tentar interpretar
+    if (typeof dateParam === 'string' && typeof timeParam === 'string') {
+        return { 
+            valid: true, 
+            dateValue: dateParam, 
+            timeValue: timeParam,
+            isTextFormat: true 
+        };
+    }
+    
+    // Se chegarem como objetos (formato ISO)
     const dateValue = dateParam.start || dateParam;
     const timeValue = timeParam.start || timeParam;
     
@@ -60,16 +75,19 @@ function validateDateTime(dateParam, timeParam) {
         return { valid: false, error: "Formato de data/hora inválido." };
     }
     
-    return { valid: true, dateValue, timeValue };
+    return { valid: true, dateValue, timeValue, isTextFormat: false };
 }
 
 // --- UTILITÁRIOS DE DATA/HORA ---
-function parseDateTime(dateValue, timeValue) {
+function parseDateTime(dateValue, timeValue, isTextFormat = false) {
     try {
-        // Extrair apenas a parte da data (YYYY-MM-DD)
-        const datePart = dateValue.split('T')[0];
+        if (isTextFormat) {
+            // Se chegaram como texto, usar interpretação inteligente
+            return parseTextDateTime(dateValue, timeValue);
+        }
         
-        // Extrair apenas a parte do tempo (HH:MM:SS)
+        // Parsing normal para formato ISO
+        const datePart = dateValue.split('T')[0];
         let timePart;
         if (timeValue.includes('T')) {
             timePart = timeValue.split('T')[1];
@@ -77,10 +95,7 @@ function parseDateTime(dateValue, timeValue) {
             timePart = timeValue;
         }
         
-        // Remover timezone se presente
         timePart = timePart.split(/[+\-Z]/)[0];
-        
-        // Combinar data e hora
         const dateTimeString = `${datePart}T${timePart}`;
         const parsedDate = new Date(dateTimeString);
         
@@ -92,6 +107,81 @@ function parseDateTime(dateValue, timeValue) {
     } catch (error) {
         throw new Error(`Erro ao processar data/hora: ${error.message}`);
     }
+}
+
+function parseTextDateTime(dateText, timeText) {
+    console.log('Parseando texto:', dateText, timeText);
+    
+    const now = new Date();
+    let targetDate = new Date();
+    
+    // Interpretar data
+    if (dateText.includes('hoje')) {
+        // Usar data atual
+    } else if (dateText.includes('amanhã')) {
+        targetDate.setDate(now.getDate() + 1);
+    } else if (dateText.includes('segunda') || dateText.includes('segunda-feira')) {
+        targetDate = getNextWeekday(1); // Segunda = 1
+    } else if (dateText.includes('terça') || dateText.includes('terça-feira')) {
+        targetDate = getNextWeekday(2);
+    } else if (dateText.includes('quarta') || dateText.includes('quarta-feira')) {
+        targetDate = getNextWeekday(3);
+    } else if (dateText.includes('quinta') || dateText.includes('quinta-feira')) {
+        targetDate = getNextWeekday(4);
+    } else if (dateText.includes('sexta') || dateText.includes('sexta-feira')) {
+        targetDate = getNextWeekday(5);
+    } else if (dateText.includes('sábado')) {
+        targetDate = getNextWeekday(6);
+    } else {
+        // Tentar interpretar como data ISO se for formato diferente
+        const isoMatch = dateText.match(/\d{4}-\d{2}-\d{2}/);
+        if (isoMatch) {
+            targetDate = new Date(isoMatch[0]);
+        }
+    }
+    
+    // Interpretar hora
+    let hours = 0, minutes = 0;
+    
+    if (timeText.includes('manhã') || timeText.includes('manha')) {
+        hours = 9; // Padrão manhã
+    } else if (timeText.includes('tarde')) {
+        if (timeText.includes('3')) hours = 15;
+        else if (timeText.includes('2')) hours = 14;
+        else if (timeText.includes('4')) hours = 16;
+        else if (timeText.includes('5')) hours = 17;
+        else hours = 14; // Padrão tarde
+    } else {
+        // Tentar extrair hora numérica
+        const hourMatch = timeText.match(/(\d{1,2})/);
+        if (hourMatch) {
+            hours = parseInt(hourMatch[1]);
+            const minuteMatch = timeText.match(/(\d{1,2}):(\d{2})/);
+            if (minuteMatch) {
+                hours = parseInt(minuteMatch[1]);
+                minutes = parseInt(minuteMatch[2]);
+            }
+        }
+    }
+    
+    targetDate.setHours(hours, minutes, 0, 0);
+    
+    console.log('Data interpretada:', targetDate.toString());
+    return targetDate;
+}
+
+function getNextWeekday(targetDay) {
+    const now = new Date();
+    const currentDay = now.getDay();
+    let daysUntilTarget = targetDay - currentDay;
+    
+    if (daysUntilTarget <= 0) {
+        daysUntilTarget += 7; // Próxima semana
+    }
+    
+    const result = new Date(now);
+    result.setDate(now.getDate() + daysUntilTarget);
+    return result;
 }
 
 function convertToSaoPauloTime(utcDate) {
@@ -306,7 +396,11 @@ async function handleScheduling(name, dateParam, timeParam) {
         }
         
         // 2. Parsear data e hora
-        const requestedDate = parseDateTime(dateTimeValidation.dateValue, dateTimeValidation.timeValue);
+        const requestedDate = parseDateTime(
+            dateTimeValidation.dateValue, 
+            dateTimeValidation.timeValue,
+            dateTimeValidation.isTextFormat
+        );
         console.log('Data parseada (UTC):', requestedDate.toISOString());
         console.log('Data parseada (Local):', requestedDate.toString());
         
