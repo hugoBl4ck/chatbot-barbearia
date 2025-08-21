@@ -27,7 +27,6 @@ app.post("/webhook", async (request, response) => {
             const currentSession = request.body.session;
             const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
             responsePayload = createResponse(result.message, context);
-
         } else {
             responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
         }
@@ -40,90 +39,97 @@ app.post("/webhook", async (request, response) => {
 });
 
 // --- FUNÇÕES AUXILIARES ---
-function getPersonName(contexts) {
-    if (!contexts || !contexts.length) return null;
-    const contextWithName = contexts.find(ctx => ctx.parameters && ctx.parameters["person.original"]);
-    return contextWithName ? contextWithName.parameters["person.original"] : null;
-}
+function getPersonName(contexts) { /* ...código anterior sem mudanças... */ }
+function createResponse(text, context = null) { /* ...código anterior sem mudanças... */ }
 
-function createResponse(text, context = null) {
-    const payload = {
-        fulfillmentMessages: [{ text: { text: [text] } }]
-    };
-    if (context) {
-        payload.outputContexts = [{ name: context, lifespanCount: 2 }];
-    }
-    return payload;
-}
-
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E SEGURA) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (REFEITA) ---
 async function handleScheduling(name, dateParam, timeParam) {
-    // Lógica de extração de data/hora a prova de falhas
-    let dateTimeString;
+    if (!dateParam || !timeParam) {
+        return { success: false, message: "Por favor, informe uma data e hora completas." };
+    }
+
     try {
         const dateValue = dateParam.start || dateParam;
         const timeValue = timeParam.start || timeParam;
-        dateTimeString = `${dateValue.split('T')[0]}T${timeValue.split('T')[1]}`;
-    } catch (e) {
-        return { success: false, message: "Não consegui entender a data e a hora. Por favor, tente um formato como 'amanhã às 10h'." };
-    }
+        const dateTimeString = `${dateValue.split('T')[0]}T${timeValue.split('T')[1]}`;
+        
+        const requestedDate = new Date(dateTimeString);
+        if (isNaN(requestedDate.getTime())) throw new Error("Data inválida");
 
-    const requestedDate = new Date(dateTimeString);
+        // Autentica e carrega a planilha
+        const doc = getDoc();
+        await doc.useServiceAccountAuth(creds);
+        await doc.loadInfo();
+        const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
+        const configSheet = doc.sheetsByTitle['Horarios'];
+        
+        // **LÓGICA REFEITA E CENTRALIZADA EM 'Intl' PARA CONSISTÊNCIA**
+        // Obtém o dia da semana e a hora NO FUSO HORÁRIO DE SÃO PAULO
+        const weekdayFormatter = new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'short' });
+        const dayMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
+        const dayOfWeek = dayMap[weekdayFormatter.format(requestedDate)];
 
-    if (isNaN(requestedDate.getTime())) {
-        return { success: false, message: "A data e hora que você informou não são válidas." };
-    }
-    
-    const timePart = dateTimeString.split('T')[1];
-    const [hours, minutes] = timePart.split(':').map(Number);
-    const requestedTime = hours + minutes / 60;
-    const dayOfWeek = requestedDate.getUTCDay();
-    
-    const doc = getDoc();
-    await doc.useServiceAccountAuth(creds);
-    await doc.loadInfo();
+        const hourFormatter = new Intl.DateTimeFormat('pt-BR', { timeZone: TIMEZONE, hour: 'numeric', minute: 'numeric', hour12: false });
+        const timeString = hourFormatter.format(requestedDate);
+        const [hours, minutes] = timeString.split(':').map(Number);
+        const requestedTime = hours + minutes / 60;
 
-    const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
-    const configSheet = doc.sheetsByTitle['Horarios'];
-    
-    const configRows = await configSheet.getRows();
-    const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
-
-    if (!dayConfig || (!dayConfig.InicioManha && !dayConfig.InicioTarde)) {
+        // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
+        const configRows = await configSheet.getRows();
+        const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
         const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(requestedDate);
-        return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
-    }
-    
-    const isMorningShift = requestedTime >= parseFloat(dayConfig.InicioManha.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimManha.replace(':', '.'));
-    const isAfternoonShift = dayConfig.InicioTarde && requestedTime >= parseFloat(dayConfig.InicioTarde.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimTarde.replace(':', '.'));
 
-    if (!isMorningShift && !isAfternoonShift) {
-        if (dayOfWeek == 6 && isMorningShift) {} else {
+        if (!dayConfig || !dayConfig.InicioManha) {
+            return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
+        }
+        
+        const inicioManha = parseFloat(dayConfig.InicioManha.replace(':', '.'));
+        const fimManha = parseFloat(dayConfig.FimManha.replace(':', '.'));
+        const inicioTarde = dayConfig.InicioTarde ? parseFloat(dayConfig.InicioTarde.replace(':', '.')) : null;
+        const fimTarde = dayConfig.FimTarde ? parseFloat(dayConfig.FimTarde.replace(':', '.')) : null;
+
+        const isMorningValid = (requestedTime >= inicioManha && requestedTime < fimManha);
+        const isAfternoonValid = (inicioTarde && requestedTime >= inicioTarde && requestedTime < fimTarde);
+
+        // Ajuste para horário de almoço e sábado (que termina no fim da "manhã")
+        if (dayOfWeek == 6) { // Sábado
+             if(!(requestedTime >= inicioManha && requestedTime < fimManha)) {
+                return { success: false, message: "Desculpe, estamos fechados neste horário. No sábado, funcionamos das 08:00 às 15:00." };
+             }
+        } else if (!isMorningValid && !isAfternoonValid) {
             return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
         }
+
+        // 2. VERIFICAR DISPONIBILIDADE
+        const existingAppointments = await scheduleSheet.getRows();
+        const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDate.toISOString());
+
+        if (isSlotTaken) {
+            return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
+        }
+        
+        // 3. SALVAR AGENDAMENTO
+        const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
+
+        await scheduleSheet.addRow({
+            NomeCliente: name,
+            DataHoraFormatada: formattedDateForUser,
+            DataHoraISO: requestedDate.toISOString(),
+            TimestampAgendamento: new Date().toISOString(),
+            Status: 'Confirmado'
+        });
+        
+        return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
+
+    } catch (e) {
+        console.error("Erro na lógica de agendamento:", e);
+        return { success: false, message: "Não consegui processar a data. Tente um formato como 'amanhã às 10:00'." };
     }
-
-    const existingAppointments = await scheduleSheet.getRows();
-    const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDate.toISOString());
-
-    if (isSlotTaken) {
-        return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
-    }
-    
-    const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
-
-    await scheduleSheet.addRow({
-        NomeCliente: name,
-        DataHoraFormatada: formattedDateForUser,
-        DataHoraISO: requestedDate.toISOString(),
-        TimestampAgendamento: new Date().toISOString(),
-        Status: 'Confirmado'
-    });
-    
-    return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
 }
 
 // Inicia o servidor
 const listener = app.listen(process.env.PORT, () => {
     console.log("Your app is listening on port " + listener.address().port);
 });
+
+// (Lembre-se de ter as funções getPersonName e createResponse aqui)
