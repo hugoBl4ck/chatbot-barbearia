@@ -22,6 +22,10 @@ app.post("/webhook", async (request, response) => {
     const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
     
     try {
+      // Adicionamos um console.log para ver o que recebemos
+      console.log("Recebido 'dateParam':", JSON.stringify(dateParam, null, 2));
+      console.log("Recebido 'timeParam':", JSON.stringify(timeParam, null, 2));
+
       const result = await handleScheduling(personName, dateParam, timeParam);
       
       if (result.success) {
@@ -60,19 +64,12 @@ function createResponse(text, context = null) {
   return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO DE DEPURAÇÃO) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM A CORREÇÃO) ---
 async function handleScheduling(name, dateParam, timeParam) {
-    
-  // ***** PASSO DE DEPURAÇÃO: Imprime os valores recebidos nos logs *****
-  console.log("--- INICIANDO DEPURAÇÃO ---");
-  console.log("Valor de 'dateParam' recebido:", JSON.stringify(dateParam, null, 2));
-  console.log("Valor de 'timeParam' recebido:", JSON.stringify(timeParam, null, 2));
-
   if (!dateParam || !timeParam) {
     return { success: false, message: "Por favor, informe uma data e hora completas." };
   }
 
-  // ... (o resto do código continua igual)
   const dateString = dateParam.start ? dateParam.start.split('T')[0] : dateParam.split('T')[0];
   const timeString = timeParam.start ? timeParam.start.split('T')[1] : timeParam.split('T')[1];
 
@@ -91,18 +88,11 @@ async function handleScheduling(name, dateParam, timeParam) {
   await doc.loadInfo();
 
   const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
-  const configSheet = doc.sheetsBytitle['Horarios'];
+  const configSheet = doc.sheetsByTitle['Horarios'];
   
-  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false });
-  const parts = formatter.formatToParts(requestedDate);
-  const getValue = (type) => parts.find(p => p.type === type).value;
-  
-  let dayOfWeek = parseInt(getValue('weekday'));
-  if(dayOfWeek === 7) dayOfWeek = 0;
-  
-  const hours = parseInt(getValue('hour'));
-  const minutes = parseInt(getValue('minute'));
-  const requestedTime = hours + minutes / 60;
+  // CORRIGIDO: Obtém o dia da semana diretamente do objeto Date, que é mais confiável.
+  const dayOfWeek = requestedDate.getDay(); // Dom=0, Seg=1... Sáb=6
+  const requestedTime = requestedDate.getHours() + requestedDate.getMinutes() / 60;
   
   const configRows = await configSheet.getRows();
   const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
