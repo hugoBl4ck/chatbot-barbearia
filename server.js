@@ -11,12 +11,20 @@ app.post("/webhook", async (request, response) => {
   let responseText = "Desculpe, não entendi o que você quis dizer.";
 
   if (intent === "AgendarHorario") {
-    // Extrai os parâmetros do Dialogflow
     const dateTime = request.body.queryResult.parameters["date-time"];
-    const personName = request.body.queryResult.outputContexts[0].parameters["person.original"] || "Cliente";
+    
+    // Tenta extrair o nome do contexto. Se não encontrar, usa "Cliente" como padrão.
+    let personName = "Cliente";
+    const outputContexts = request.body.queryResult.outputContexts;
+    if (outputContexts && outputContexts.length > 0) {
+      // Procura o contexto que contém o parâmetro 'person.original'
+      const contextWithName = outputContexts.find(ctx => ctx.parameters && ctx.parameters["person.original"]);
+      if (contextWithName) {
+        personName = contextWithName.parameters["person.original"];
+      }
+    }
 
     try {
-      // Salva na planilha e formata a data
       const formattedDate = await saveToSheet(personName, dateTime);
       responseText = `Perfeito, ${personName}! Seu agendamento foi confirmado e salvo para ${formattedDate}.`;
     } catch (error) {
@@ -25,45 +33,41 @@ app.post("/webhook", async (request, response) => {
     }
   }
 
-  // Envia a resposta de volta ao Dialogflow
   response.json({ fulfillmentText: responseText });
 });
 
 
 // --- FUNÇÃO PARA SALVAR NA PLANILHA ---
 async function saveToSheet(name, dateTime) {
-  // Carrega as credenciais do ambiente do Render
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const sheetId = process.env.SHEET_ID;
 
-  // Inicializa a conexão com a planilha usando o ID
   const doc = new GoogleSpreadsheet(sheetId);
-  
-  // Autentica usando a conta de serviço
   await doc.useServiceAccountAuth(creds);
+  await doc.loadInfo();
   
-  // Carrega as informações da planilha
-  await doc.loadInfo(); 
-  
-  // Seleciona a primeira aba (worksheet) da planilha
   const sheet = doc.sheetsByIndex[0];
+
+  // ***** A CORREÇÃO ESTÁ AQUI *****
+  // Verifica se 'dateTime' é um objeto com a propriedade 'start'. Se for, usa o valor de 'start'.
+  // Se não, usa o próprio 'dateTime' (que deve ser uma string).
+  const dateString = (typeof dateTime === 'object' && dateTime.start) ? dateTime.start : dateTime;
   
-  // Formata a data para um formato amigável ANTES de salvar
-  const dateObj = new Date(dateTime);
+  // Usa a 'dateString' corrigida para criar o objeto de Data.
+  const dateObj = new Date(dateString);
+  
   const options = {
       year: 'numeric', month: 'long', day: 'numeric',
       hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo'
   };
   const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', options).format(dateObj);
 
-  // Adiciona uma nova linha com os dados
   await sheet.addRow({
     NomeCliente: name,
-    DataHoraAgendamento: formattedDateForUser, // Salva a data já formatada
+    DataHoraAgendamento: formattedDateForUser,
     Status: 'Confirmado'
   });
   
-  // Retorna a data formatada para ser usada na resposta ao usuário
   return formattedDateForUser;
 }
 
