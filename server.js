@@ -59,7 +59,7 @@ function createResponse(text, context = null) {
   return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E CORRIGIDA) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL) ---
 async function handleScheduling(name, dateParam, timeParam) {
   if (!dateParam || !timeParam) {
     return { success: false, message: "Por favor, informe uma data e hora completas." };
@@ -91,15 +91,12 @@ async function handleScheduling(name, dateParam, timeParam) {
     return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
   }
   
-  // ***** A CORREÇÃO FINAL ESTÁ AQUI *****
-  // Trocamos '<' por '<=' para incluir o horário final (ex: 12:00 e 18:00)
   const isMorningShift = requestedTime >= parseFloat(dayConfig.InicioManha.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimManha.replace(':', '.'));
   const isAfternoonShift = dayConfig.InicioTarde && requestedTime >= parseFloat(dayConfig.InicioTarde.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimTarde.replace(':', '.'));
 
   if (!isMorningShift && !isAfternoonShift) {
-    // Lógica para o sábado, que não tem turno da tarde
     if (dayOfWeek == 6 && isMorningShift) {
-        // Horário de sábado é válido, não faça nada aqui
+        // Horário de sábado é válido
     } else {
         return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
     }
@@ -112,17 +109,23 @@ async function handleScheduling(name, dateParam, timeParam) {
     return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
   }
   
-  const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
+  // ***** CORREÇÃO FINAL DA MENSAGEM DE SAÍDA *****
+  // Formata a parte da data com Intl
+  const formattedDatePart = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeZone: TIMEZONE }).format(requestedDate);
+  // Formata a parte da hora manualmente para garantir a precisão
+  const formattedTimePart = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  
+  const finalFormattedDate = `${formattedDatePart} às ${formattedTimePart}`;
 
   await scheduleSheet.addRow({
     NomeCliente: name,
-    DataHoraFormatada: formattedDateForUser,
+    DataHoraFormatada: finalFormattedDate, // Salva a data 100% correta
     DataHoraISO: requestedDate.toISOString(),
     TimestampAgendamento: new Date().toISOString(),
     Status: 'Confirmado'
   });
   
-  return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
+  return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${finalFormattedDate}.` };
 }
 
 // Inicia o servidor
