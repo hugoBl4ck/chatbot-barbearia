@@ -11,7 +11,9 @@ app.post("/webhook", async (request, response) => {
   let responseText = "Desculpe, não entendi o que você quis dizer.";
 
   if (intent === "AgendarHorario") {
-    const dateTime = request.body.queryResult.parameters["date-time"];
+    // ***** A CORREÇÃO FINAL ESTÁ AQUI *****
+    // Estávamos pegando o objeto inteiro. Agora pegamos a propriedade 'date_time' DENTRO do objeto.
+    const dateTime = request.body.queryResult.parameters["date-time"].date_time;
     
     let personName = "Cliente";
     const outputContexts = request.body.queryResult.outputContexts;
@@ -25,7 +27,7 @@ app.post("/webhook", async (request, response) => {
     try {
       const formattedDate = await saveToSheet(personName, dateTime);
       responseText = `Perfeito, ${personName}! Seu agendamento foi confirmado e salvo para ${formattedDate}.`;
-    } catch (error) {
+    } catch (error)      {
       console.error("Erro ao salvar na planilha:", error);
       responseText = "Houve um erro ao tentar salvar seu agendamento. Por favor, tente novamente.";
     }
@@ -35,10 +37,10 @@ app.post("/webhook", async (request, response) => {
 });
 
 
-// --- FUNÇÃO PARA SALVAR NA PLANILHA (VERSÃO DE DEPURAÇÃO) ---
+// --- FUNÇÃO PARA SALVAR NA PLANILHA (VERSÃO ROBUSTA) ---
 async function saveToSheet(name, dateTime) {
-  // ***** PASSO DE DEPURAÇÃO: Imprime o valor recebido nos logs *****
-  console.log("Valor de 'dateTime' recebido do Dialogflow:", JSON.stringify(dateTime, null, 2));
+  // O console.log de depuração pode ser removido ou comentado
+  // console.log("Valor de 'dateTime' recebido:", JSON.stringify(dateTime, null, 2));
 
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const sheetId = process.env.SHEET_ID;
