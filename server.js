@@ -9,7 +9,7 @@ app.use(express.json());
 const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 const sheetId = process.env.SHEET_ID;
 const doc = new GoogleSpreadsheet(sheetId);
-const TIMEZONE = 'America/Sao_Paulo'; // Fuso horário oficial do Brasil
+const TIMEZONE = 'America/Sao_Paulo';
 
 // Função principal do webhook
 app.post("/webhook", async (request, response) => {
@@ -60,13 +60,19 @@ function createResponse(text, context = null) {
   return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM CORREÇÃO DE TIMEZONE) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO DE DEPURAÇÃO) ---
 async function handleScheduling(name, dateParam, timeParam) {
+    
+  // ***** PASSO DE DEPURAÇÃO: Imprime os valores recebidos nos logs *****
+  console.log("--- INICIANDO DEPURAÇÃO ---");
+  console.log("Valor de 'dateParam' recebido:", JSON.stringify(dateParam, null, 2));
+  console.log("Valor de 'timeParam' recebido:", JSON.stringify(timeParam, null, 2));
+
   if (!dateParam || !timeParam) {
     return { success: false, message: "Por favor, informe uma data e hora completas." };
   }
 
-  // Extrai a string de data/hora de dentro dos objetos do Dialogflow
+  // ... (o resto do código continua igual)
   const dateString = dateParam.start ? dateParam.start.split('T')[0] : dateParam.split('T')[0];
   const timeString = timeParam.start ? timeParam.start.split('T')[1] : timeParam.split('T')[1];
 
@@ -85,22 +91,19 @@ async function handleScheduling(name, dateParam, timeParam) {
   await doc.loadInfo();
 
   const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
-  const configSheet = doc.sheetsByTitle['Horarios'];
+  const configSheet = doc.sheetsBytitle['Horarios'];
   
-  // ***** CORREÇÃO DE FUSO HORÁRIO *****
-  // Usa a API Intl para extrair os componentes da data NO FUSO HORÁRIO CORRETO
   const formatter = new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false });
   const parts = formatter.formatToParts(requestedDate);
   const getValue = (type) => parts.find(p => p.type === type).value;
   
-  let dayOfWeek = parseInt(getValue('weekday')); // Intl: Dom=7, Seg=1... Sáb=6. Nosso padrão: Dom=0...Sáb=6
-  if(dayOfWeek === 7) dayOfWeek = 0; // Converte Domingo para 0
+  let dayOfWeek = parseInt(getValue('weekday'));
+  if(dayOfWeek === 7) dayOfWeek = 0;
   
   const hours = parseInt(getValue('hour'));
   const minutes = parseInt(getValue('minute'));
   const requestedTime = hours + minutes / 60;
   
-  // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
   const configRows = await configSheet.getRows();
   const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
 
@@ -116,7 +119,6 @@ async function handleScheduling(name, dateParam, timeParam) {
     return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
   }
 
-  // 2. VERIFICAR DISPONIBILIDADE
   const existingAppointments = await scheduleSheet.getRows();
   const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDate.toISOString());
 
@@ -124,7 +126,6 @@ async function handleScheduling(name, dateParam, timeParam) {
     return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
   }
   
-  // 3. SALVAR AGENDAMENTO
   const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
 
   await scheduleSheet.addRow({
