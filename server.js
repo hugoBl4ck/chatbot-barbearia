@@ -22,10 +22,6 @@ app.post("/webhook", async (request, response) => {
     const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
     
     try {
-      // Adicionamos um console.log para ver o que recebemos
-      console.log("Recebido 'dateParam':", JSON.stringify(dateParam, null, 2));
-      console.log("Recebido 'timeParam':", JSON.stringify(timeParam, null, 2));
-
       const result = await handleScheduling(personName, dateParam, timeParam);
       
       if (result.success) {
@@ -47,7 +43,6 @@ app.post("/webhook", async (request, response) => {
 });
 
 // --- FUNÇÕES AUXILIARES ---
-
 function getPersonName(contexts) {
   if (!contexts || !contexts.length) return null;
   const contextWithName = contexts.find(ctx => ctx.parameters && ctx.parameters["person.original"]);
@@ -64,25 +59,31 @@ function createResponse(text, context = null) {
   return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM A CORREÇÃO) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E ROBUSTA) ---
 async function handleScheduling(name, dateParam, timeParam) {
   if (!dateParam || !timeParam) {
     return { success: false, message: "Por favor, informe uma data e hora completas." };
   }
 
-  const dateString = dateParam.start ? dateParam.start.split('T')[0] : dateParam.split('T')[0];
-  const timeString = timeParam.start ? timeParam.start.split('T')[1] : timeParam.split('T')[1];
+  // Extrai a string de data/hora de dentro dos objetos do Dialogflow
+  const dateTimeString = dateParam.start ? dateParam.start : dateParam;
 
-  if (!dateString || !timeString) {
-      return { success: false, message: "Não consegui extrair a data ou a hora. Tente novamente." };
+  if (!dateTimeString || typeof dateTimeString !== 'string') {
+    return { success: false, message: "Não consegui extrair a data. Tente um formato diferente." };
   }
   
-  const requestedDateTimeString = `${dateString}T${timeString}`;
-  const requestedDate = new Date(requestedDateTimeString);
-  
+  // Cria um objeto Date para obter o dia da semana e para formatação final
+  const requestedDate = new Date(dateTimeString);
   if (isNaN(requestedDate.getTime())) {
     return { success: false, message: "A data e hora que você informou não são válidas." };
   }
+
+  // ***** CORREÇÃO DEFINITIVA DE FUSO HORÁRIO *****
+  // Extrai a hora e minutos diretamente da string de tempo para evitar conversões de fuso
+  const timePart = dateTimeString.split('T')[1];
+  const [hours, minutes] = timePart.split(':').map(Number);
+  const requestedTime = hours + minutes / 60;
+  const dayOfWeek = requestedDate.getUTCDay(); // Usamos getUTCDay para ser consistente
   
   await doc.useServiceAccountAuth(creds);
   await doc.loadInfo();
@@ -90,10 +91,7 @@ async function handleScheduling(name, dateParam, timeParam) {
   const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
   const configSheet = doc.sheetsByTitle['Horarios'];
   
-  // CORRIGIDO: Obtém o dia da semana diretamente do objeto Date, que é mais confiável.
-  const dayOfWeek = requestedDate.getDay(); // Dom=0, Seg=1... Sáb=6
-  const requestedTime = requestedDate.getHours() + requestedDate.getMinutes() / 60;
-  
+  // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
   const configRows = await configSheet.getRows();
   const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
 
@@ -109,6 +107,7 @@ async function handleScheduling(name, dateParam, timeParam) {
     return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
   }
 
+  // 2. VERIFICAR DISPONIBILIDADE
   const existingAppointments = await scheduleSheet.getRows();
   const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDate.toISOString());
 
@@ -116,6 +115,7 @@ async function handleScheduling(name, dateParam, timeParam) {
     return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
   }
   
+  // 3. SALVAR AGENDAMENTO
   const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
 
   await scheduleSheet.addRow({
