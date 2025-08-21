@@ -287,6 +287,14 @@ function createResponse(text, context = null, suggestions = []) {
 // --- FUNÇÃO PRINCIPAL DE AGENDAMENTO ---
 async function handleScheduling(name, dateParam, timeParam) {
     try {
+        // === LOGS DE DEBUG ===
+        console.log('\n=== DEBUG AGENDAMENTO ===');
+        console.log('Nome:', name);
+        console.log('dateParam RAW:', JSON.stringify(dateParam, null, 2));
+        console.log('timeParam RAW:', JSON.stringify(timeParam, null, 2));
+        console.log('dateParam type:', typeof dateParam, Array.isArray(dateParam) ? '[ARRAY]' : '[NOT ARRAY]');
+        console.log('timeParam type:', typeof timeParam, Array.isArray(timeParam) ? '[ARRAY]' : '[NOT ARRAY]');
+        
         // 1. Validar entrada
         const dateTimeValidation = validateDateTime(dateParam, timeParam);
         if (!dateTimeValidation.valid) {
@@ -299,6 +307,8 @@ async function handleScheduling(name, dateParam, timeParam) {
         
         // 2. Parsear data e hora
         const requestedDate = parseDateTime(dateTimeValidation.dateValue, dateTimeValidation.timeValue);
+        console.log('Data parseada (UTC):', requestedDate.toISOString());
+        console.log('Data parseada (Local):', requestedDate.toString());
         
         // 3. Verificar se não é no passado
         if (isInThePast(requestedDate)) {
@@ -315,6 +325,11 @@ async function handleScheduling(name, dateParam, timeParam) {
         const hours = localDate.getUTCHours();
         const minutes = localDate.getUTCMinutes();
         const requestedTime = hours + minutes / 60;
+        
+        console.log('Data convertida SP:', localDate.toISOString());
+        console.log('Dia da semana:', dayOfWeek, '(0=Dom, 1=Seg, etc.)');
+        console.log('Hora decimal:', requestedTime, '(', hours, ':', minutes, ')');
+        console.log('============================\n');
         
         // 5. Verificar dia da semana
         if (!isDuringBusinessDays(dayOfWeek)) {
@@ -334,8 +349,19 @@ async function handleScheduling(name, dateParam, timeParam) {
         const configRows = await getBusinessConfig();
         const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
         
+        console.log('Configuração do dia encontrada:', dayConfig ? {
+            DiaDaSemana: dayConfig.DiaDaSemana,
+            InicioManha: dayConfig.InicioManha,
+            FimManha: dayConfig.FimManha,
+            InicioTarde: dayConfig.InicioTarde,
+            FimTarde: dayConfig.FimTarde
+        } : 'NENHUMA CONFIGURAÇÃO ENCONTRADA');
+        
         // 7. Verificar horário de funcionamento
-        if (!isBusinessHours(requestedTime, dayConfig)) {
+        const isValidTime = isBusinessHours(requestedTime, dayConfig);
+        console.log('Horário válido?', isValidTime);
+        
+        if (!isValidTime) {
             const horarios = dayConfig ? 
                 `${dayConfig.InicioManha} às ${dayConfig.FimManha}${dayConfig.InicioTarde ? ` e ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : ''}` :
                 "nossos horários de funcionamento";
