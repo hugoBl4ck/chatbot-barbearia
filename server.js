@@ -19,16 +19,21 @@ app.post("/webhook", async (request, response) => {
   if (intent === "AgendarHorario") {
     const dateParam = request.body.queryResult.parameters.data;
     const timeParam = request.body.queryResult.parameters.hora;
+    const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
     
     try {
-      const resultMessage = await handleSchedulingDebug(dateParam, timeParam);
-      // Para depuração, sempre mantemos a conversa ativa
-      const currentSession = request.body.session;
-      responsePayload = createResponse(resultMessage, `${currentSession}/contexts/aguardando_agendamento`);
+      const result = await handleScheduling(personName, dateParam, timeParam);
+      
+      if (result.success) {
+        responsePayload = createResponse(result.message);
+      } else {
+        const currentSession = request.body.session;
+        responsePayload = createResponse(result.message, `${currentSession}/contexts/aguardando_agendamento`);
+      }
 
     } catch (error) {
       console.error("Erro CRÍTICO no fluxo de agendamento:", error);
-      responsePayload = createResponse(`Erro interno: ${error.message}`);
+      responsePayload = createResponse("Houve um erro interno. Por favor, tente mais tarde.");
     }
   } else {
     responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
@@ -37,7 +42,13 @@ app.post("/webhook", async (request, response) => {
   response.json(responsePayload);
 });
 
-// --- FUNÇÃO DE RESPOSTA ---
+// --- FUNÇÕES AUXILIARES ---
+function getPersonName(contexts) {
+  if (!contexts || !contexts.length) return null;
+  const contextWithName = contexts.find(ctx => ctx.parameters && ctx.parameters["person.original"]);
+  return contextWithName ? contextWithName.parameters["person.original"] : null;
+}
+
 function createResponse(text, context = null) {
   const payload = {
     fulfillmentMessages: [{ text: { text: [text] } }]
@@ -48,17 +59,17 @@ function createResponse(text, context = null) {
   return payload;
 }
 
-// --- FUNÇÃO DE AGENDAMENTO (VERSÃO DE DEPURAÇÃO) ---
-async function handleSchedulingDebug(dateParam, timeParam) {
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E CORRIGIDA) ---
+async function handleScheduling(name, dateParam, timeParam) {
   if (!dateParam || !timeParam) {
-    return "DEBUG: Parâmetros de data ou hora faltando.";
+    return { success: false, message: "Por favor, informe uma data e hora completas." };
   }
 
   const dateTimeString = dateParam.start ? dateParam.start : dateParam;
   const requestedDate = new Date(dateTimeString);
 
   if (isNaN(requestedDate.getTime())) {
-    return `DEBUG: Data inválida criada a partir de '${dateTimeString}'.`;
+    return { success: false, message: "A data e hora que você informou não são válidas." };
   }
   
   const timePart = dateTimeString.split('T')[1];
@@ -68,41 +79,50 @@ async function handleSchedulingDebug(dateParam, timeParam) {
   
   await doc.useServiceAccountAuth(creds);
   await doc.loadInfo();
+
+  const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
   const configSheet = doc.sheetsByTitle['Horarios'];
+  
   const configRows = await configSheet.getRows();
   const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
 
-  if (!dayConfig) {
-    return `DEBUG: Não encontrei configuração para o DiaDaSemana=${dayOfWeek}. Verifique a planilha 'Horarios'.`;
+  if (!dayConfig || (!dayConfig.InicioManha && !dayConfig.InicioTarde)) {
+    const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(requestedDate);
+    return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
   }
-
-  const inicioManha = parseFloat(dayConfig.InicioManha.replace(':', '.'));
-  const fimManha = parseFloat(dayConfig.FimManha.replace(':', '.'));
-  const isMorningShift = requestedTime >= inicioManha && requestedTime < fimManha;
-
-  let debugMessage = [
-    `--- DADOS DE DEPURAÇÃO ---`,
-    `Data Recebida: ${dateTimeString}`,
-    `Dia da Semana Calculado: ${dayOfWeek} (Dom=0, Seg=1...)`,
-    `Hora Calculada: ${requestedTime}`,
-    `--- Planilha 'Horarios' (Linha ${dayOfWeek}) ---`,
-    `DiaDaSemana Lido: ${dayConfig.DiaDaSemana}`,
-    `Início Manhã Lido: ${dayConfig.InicioManha} (${inicioManha})`,
-    `Fim Manhã Lido: ${dayConfig.FimManha} (${fimManha})`,
-    `--- Verificação ---`,
-    `Está na Manhã? (${requestedTime} >= ${inicioManha} && ${requestedTime} < ${fimManha}) = ${isMorningShift}`
-  ];
   
-  if (dayConfig.InicioTarde) {
-      const inicioTarde = parseFloat(dayConfig.InicioTarde.replace(':', '.'));
-      const fimTarde = parseFloat(dayConfig.FimTarde.replace(':', '.'));
-      const isAfternoonShift = requestedTime >= inicioTarde && requestedTime < fimTarde;
-      debugMessage.push(`Início Tarde Lido: ${dayConfig.InicioTarde} (${inicioTarde})`);
-      debugMessage.push(`Fim Tarde Lido: ${dayConfig.FimTarde} (${fimTarde})`);
-      debugMessage.push(`Está na Tarde? (${requestedTime} >= ${inicioTarde} && ${requestedTime} < ${fimTarde}) = ${isAfternoonShift}`);
+  // ***** A CORREÇÃO FINAL ESTÁ AQUI *****
+  // Trocamos '<' por '<=' para incluir o horário final (ex: 12:00 e 18:00)
+  const isMorningShift = requestedTime >= parseFloat(dayConfig.InicioManha.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimManha.replace(':', '.'));
+  const isAfternoonShift = dayConfig.InicioTarde && requestedTime >= parseFloat(dayConfig.InicioTarde.replace(':', '.')) && requestedTime <= parseFloat(dayConfig.FimTarde.replace(':', '.'));
+
+  if (!isMorningShift && !isAfternoonShift) {
+    // Lógica para o sábado, que não tem turno da tarde
+    if (dayOfWeek == 6 && isMorningShift) {
+        // Horário de sábado é válido, não faça nada aqui
+    } else {
+        return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
+    }
   }
 
-  return debugMessage.join('\n');
+  const existingAppointments = await scheduleSheet.getRows();
+  const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDate.toISOString());
+
+  if (isSlotTaken) {
+    return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
+  }
+  
+  const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
+
+  await scheduleSheet.addRow({
+    NomeCliente: name,
+    DataHoraFormatada: formattedDateForUser,
+    DataHoraISO: requestedDate.toISOString(),
+    TimestampAgendamento: new Date().toISOString(),
+    Status: 'Confirmado'
+  });
+  
+  return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
 }
 
 // Inicia o servidor
