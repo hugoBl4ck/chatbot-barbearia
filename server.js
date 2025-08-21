@@ -33,7 +33,15 @@ app.post("/webhook", async (request, response) => {
     }
   }
 
-  response.json({ fulfillmentText: responseText });
+  response.json({
+  fulfillmentMessages: [
+    {
+      text: {
+        text: [responseText]
+      }
+    }
+  ]
+});
 });
 
 
