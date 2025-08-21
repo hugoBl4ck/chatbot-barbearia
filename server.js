@@ -21,12 +21,11 @@ app.post("/webhook", async (request, response) => {
     const intent = request.body.queryResult.intent.displayName;
     let responsePayload;
 
-    if (intent === "AgendarHorario") {
-        const dateParam = request.body.queryResult.parameters.data;
-        const timeParam = request.body.queryResult.parameters.hora;
-        const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
-        
-        try {
+    try {
+        if (intent === "AgendarHorario") {
+            const dateParam = request.body.queryResult.parameters.data;
+            const timeParam = request.body.queryResult.parameters.hora;
+            const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
             const result = await handleScheduling(personName, dateParam, timeParam);
             
             if (result.success) {
@@ -35,13 +34,13 @@ app.post("/webhook", async (request, response) => {
                 const currentSession = request.body.session;
                 responsePayload = createResponse(result.message, `${currentSession}/contexts/aguardando_agendamento`);
             }
-
-        } catch (error) {
-            console.error("Erro CRÍTICO no fluxo de agendamento:", error);
-            responsePayload = createResponse("Houve um erro interno. Por favor, tente mais tarde.");
+        } else {
+            // Adicione aqui a lógica para a intent "VerificarDisponibilidade" se desejar
+            responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
         }
-    } else {
-        responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
+    } catch (error) {
+        console.error("Erro CRÍTICO no webhook:", error);
+        responsePayload = createResponse("Houve um erro interno. Por favor, tente mais tarde.");
     }
 
     response.json(responsePayload);
@@ -64,7 +63,7 @@ function createResponse(text, context = null) {
     return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (VERSÃO FINAL E CORRIGIDA) ---
 async function handleScheduling(name, dateParam, timeParam) {
     if (!dateParam || !timeParam) {
         return { success: false, message: "Por favor, informe uma data e hora completas." };
@@ -82,7 +81,6 @@ async function handleScheduling(name, dateParam, timeParam) {
     const requestedTime = hours + minutes / 60;
     const dayOfWeek = requestedDate.getUTCDay();
     
-    // Usa uma nova instância do 'doc' a cada chamada
     const doc = getDoc();
     await doc.useServiceAccountAuth(creds);
     await doc.loadInfo();
@@ -118,9 +116,10 @@ async function handleScheduling(name, dateParam, timeParam) {
     
     const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDate);
 
+    // CORREÇÃO DO ERRO DE DIGITAÇÃO:
     await scheduleSheet.addRow({
         NomeCliente: name,
-        DataHoraFormatada: finalFormattedDate,
+        DataHoraFormatada: formattedDateForUser, // Variável correta usada aqui
         DataHoraISO: requestedDate.toISOString(),
         TimestampAgendamento: new Date().toISOString(),
         Status: 'Confirmado'
