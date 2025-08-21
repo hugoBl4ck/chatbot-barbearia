@@ -8,7 +8,7 @@ app.use(express.json());
 // --- CONFIGURAÇÃO DA PLANILHA E CREDENCIAIS ---
 const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 const sheetId = process.env.SHEET_ID;
-const TIMEZONE_OFFSET_HOURS = -3; // UTC-3 para o Horário de Brasília
+const TIMEZONE = 'America/Sao_Paulo';
 
 const getDoc = () => new GoogleSpreadsheet(sheetId);
 
@@ -27,7 +27,6 @@ app.post("/webhook", async (request, response) => {
             const currentSession = request.body.session;
             const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
             responsePayload = createResponse(result.message, context);
-
         } else {
             responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
         }
@@ -56,9 +55,13 @@ function createResponse(text, context = null) {
     return payload;
 }
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (COM LÓGICA DE TIMEZONE CORRIGIDA) ---
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (REFEITA COM ANÁLISE DO ESPECIALISTA) ---
 async function handleScheduling(name, dateParam, timeParam) {
     try {
+        if (!dateParam || !timeParam) {
+            return { success: false, message: "Por favor, informe uma data e hora completas." };
+        }
+
         const dateValue = dateParam.start || dateParam;
         const timeValue = timeParam.start || timeParam;
         const dateTimeString = `${dateValue.split('T')[0]}T${timeValue.split('T')[1]}`;
@@ -66,24 +69,37 @@ async function handleScheduling(name, dateParam, timeParam) {
         const requestedDateUTC = new Date(dateTimeString);
         if (isNaN(requestedDateUTC.getTime())) throw new Error("Data inválida");
 
-        // **CORREÇÃO DE FUSO HORÁRIO (LÓGICA ROBUSTA)**
-        const userLocalDate = new Date(requestedDateUTC.getTime() + (TIMEZONE_OFFSET_HOURS * 60 * 60 * 1000));
+        // **CORREÇÃO DO ESPECIALISTA: Usar Intl.DateTimeFormat para obter componentes no fuso correto**
+        const options = { 
+            timeZone: TIMEZONE,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', hour12: false
+        };
         
-        const dayOfWeek = userLocalDate.getUTCDay(); // Dom=0, Seg=1...
-        const hours = userLocalDate.getUTCHours();
-        const minutes = userLocalDate.getUTCMinutes();
+        const formatter = new Intl.DateTimeFormat('en-CA', options); // en-CA usa formato AAAA-MM-DD
+        const parts = formatter.formatToParts(requestedDateUTC);
+        
+        const dateComponents = {};
+        parts.forEach(part => { dateComponents[part.type] = part.value; });
+        
+        // Obter dia da semana (0=domingo, 1=segunda, ...) de forma segura
+        const localDateForDay = new Date(`${dateComponents.year}-${dateComponents.month}-${dateComponents.day}T${dateComponents.hour}:${dateComponents.minute}:00`);
+        const dayOfWeek = localDateForDay.getDay();
+        
+        const hours = parseInt(dateComponents.hour);
+        const minutes = parseInt(dateComponents.minute);
         const requestedTime = hours + minutes / 60;
         
+        // O restante do código usa os valores corretos agora
         const doc = getDoc();
         await doc.useServiceAccountAuth(creds);
         await doc.loadInfo();
         const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
         const configSheet = doc.sheetsByTitle['Horarios'];
         
-        // 1. VERIFICAR HORÁRIO DE FUNCIONAMENTO
         const configRows = await configSheet.getRows();
         const dayConfig = configRows.find(row => row.DiaDaSemana == dayOfWeek);
-        const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: 'America/Sao_Paulo' }).format(requestedDateUTC);
+        const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: TIMEZONE }).format(requestedDateUTC);
 
         if (!dayConfig || !dayConfig.InicioManha) {
             return { success: false, message: `Desculpe, não funcionamos neste dia (${dayName}).` };
@@ -96,23 +112,18 @@ async function handleScheduling(name, dateParam, timeParam) {
 
         const isMorningValid = (requestedTime >= inicioManha && requestedTime < fimManha);
         const isAfternoonValid = (inicioTarde && requestedTime >= inicioTarde && requestedTime < fimTarde);
-
-        // Lógica de verificação corrigida e simplificada
+        
         if (!isMorningValid && !isAfternoonValid) {
             return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
         }
-
-        // 2. VERIFICAR DISPONIBILIDADE
+        
         const existingAppointments = await scheduleSheet.getRows();
         const isSlotTaken = existingAppointments.some(appointment => appointment.DataHoraISO === requestedDateUTC.toISOString());
-
         if (isSlotTaken) {
             return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
         }
         
-        // 3. SALVAR AGENDAMENTO
-        const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: 'America/Sao_Paulo' }).format(requestedDateUTC);
-
+        const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: TIMEZONE }).format(requestedDateUTC);
         await scheduleSheet.addRow({
             NomeCliente: name,
             DataHoraFormatada: formattedDateForUser,
@@ -122,7 +133,6 @@ async function handleScheduling(name, dateParam, timeParam) {
         });
         
         return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
-
     } catch (e) {
         console.error("Erro na lógica de agendamento:", e);
         return { success: false, message: "Não consegui processar a data. Tente um formato como 'amanhã às 10:00'." };
