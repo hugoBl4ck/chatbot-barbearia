@@ -48,34 +48,119 @@ function validateRequest(request) {
     return true;
 }
 
-function validateDateTime(dateParam, timeParam) {
-    console.log('Validando parâmetros...');
-    console.log('dateParam:', dateParam, typeof dateParam);
-    console.log('timeParam:', timeParam, typeof timeParam);
+function validateDateTime(dateParam, timeParam, originalQuery = '') {
+    console.log('=== VALIDAÇÃO ===');
+    console.log('dateParam:', JSON.stringify(dateParam));
+    console.log('timeParam:', JSON.stringify(timeParam));
+    console.log('originalQuery:', originalQuery);
     
-    if (!dateParam || !timeParam) {
+    // Se não temos parâmetros estruturados, tentar extrair da query original
+    if ((!dateParam || !timeParam) && originalQuery) {
+        console.log('Tentando extrair da query original...');
+        const extracted = extractFromQuery(originalQuery);
+        if (extracted.date && extracted.time) {
+            return {
+                valid: true,
+                dateValue: extracted.date,
+                timeValue: extracted.time,
+                isTextFormat: true,
+                source: 'query'
+            };
+        }
+    }
+    
+    // Verificar se temos parâmetros válidos
+    if (!dateParam || !timeParam || 
+        dateParam === '' || timeParam === '' ||
+        dateParam === 'Enter value' || timeParam === 'Enter value') {
         return { valid: false, error: "Por favor, informe uma data e hora completas." };
     }
     
-    // Se chegarem como string (texto), tentar interpretar
+    // Se chegarem como string (texto)
     if (typeof dateParam === 'string' && typeof timeParam === 'string') {
         return { 
             valid: true, 
             dateValue: dateParam, 
             timeValue: timeParam,
-            isTextFormat: true 
+            isTextFormat: true,
+            source: 'params'
         };
     }
     
     // Se chegarem como objetos (formato ISO)
-    const dateValue = dateParam.start || dateParam;
-    const timeValue = timeParam.start || timeParam;
+    const dateValue = dateParam?.start || dateParam;
+    const timeValue = timeParam?.start || timeParam;
     
     if (!dateValue || !timeValue) {
         return { valid: false, error: "Formato de data/hora inválido." };
     }
     
-    return { valid: true, dateValue, timeValue, isTextFormat: false };
+    return { 
+        valid: true, 
+        dateValue, 
+        timeValue, 
+        isTextFormat: false,
+        source: 'structured'
+    };
+}
+
+function extractFromQuery(query) {
+    console.log('Extraindo da query:', query);
+    
+    const result = { date: null, time: null };
+    const queryLower = query.toLowerCase();
+    
+    // Extrair data
+    if (queryLower.includes('hoje')) {
+        result.date = 'hoje';
+    } else if (queryLower.includes('amanhã') || queryLower.includes('amanha')) {
+        result.date = 'amanhã';
+    } else if (queryLower.includes('segunda')) {
+        result.date = 'segunda-feira';
+    } else if (queryLower.includes('terça') || queryLower.includes('terca')) {
+        result.date = 'terça-feira';
+    } else if (queryLower.includes('quarta')) {
+        result.date = 'quarta-feira';
+    } else if (queryLower.includes('quinta')) {
+        result.date = 'quinta-feira';
+    } else if (queryLower.includes('sexta')) {
+        result.date = 'sexta-feira';
+    } else if (queryLower.includes('sábado') || queryLower.includes('sabado')) {
+        result.date = 'sábado';
+    }
+    
+    // Extrair hora - mais padrões
+    const hourPatterns = [
+        /(\d{1,2})h(\d{2})?/,  // 9h, 9h30
+        /(\d{1,2}):(\d{2})/,   // 9:00, 14:30
+        /(\d{1,2}) horas?/,    // 9 horas
+        /às (\d{1,2})/,        // às 9
+    ];
+    
+    for (const pattern of hourPatterns) {
+        const match = queryLower.match(pattern);
+        if (match) {
+            const hour = parseInt(match[1]);
+            const minute = match[2] ? parseInt(match[2]) : 0;
+            result.time = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+            break;
+        }
+    }
+    
+    // Casos especiais
+    if (queryLower.includes('manhã') || queryLower.includes('manha')) {
+        if (!result.time) result.time = '09:00';
+    }
+    if (queryLower.includes('tarde')) {
+        if (queryLower.includes('3') || queryLower.includes('três')) {
+            result.time = '15:00';
+        } else if (!result.time) {
+            result.time = '14:00';
+        }
+    }
+    
+    console.log('Resultado extração:', result);
+    return result;
 }
 
 // --- UTILITÁRIOS DE DATA/HORA ---
@@ -110,30 +195,36 @@ function parseDateTime(dateValue, timeValue, isTextFormat = false) {
 }
 
 function parseTextDateTime(dateText, timeText) {
-    console.log('Parseando texto:', dateText, timeText);
+    console.log('=== PARSEANDO TEXTO ===');
+    console.log('Data:', dateText);
+    console.log('Hora:', timeText);
     
     const now = new Date();
     let targetDate = new Date();
     
     // Interpretar data
-    if (dateText.includes('hoje')) {
+    const dateTextLower = dateText.toLowerCase();
+    
+    if (dateTextLower.includes('hoje')) {
         // Usar data atual
-    } else if (dateText.includes('amanhã')) {
+        targetDate = new Date(now);
+    } else if (dateTextLower.includes('amanhã') || dateTextLower.includes('amanha')) {
+        targetDate = new Date(now);
         targetDate.setDate(now.getDate() + 1);
-    } else if (dateText.includes('segunda') || dateText.includes('segunda-feira')) {
-        targetDate = getNextWeekday(1); // Segunda = 1
-    } else if (dateText.includes('terça') || dateText.includes('terça-feira')) {
+    } else if (dateTextLower.includes('segunda')) {
+        targetDate = getNextWeekday(1);
+    } else if (dateTextLower.includes('terça') || dateTextLower.includes('terca')) {
         targetDate = getNextWeekday(2);
-    } else if (dateText.includes('quarta') || dateText.includes('quarta-feira')) {
+    } else if (dateTextLower.includes('quarta')) {
         targetDate = getNextWeekday(3);
-    } else if (dateText.includes('quinta') || dateText.includes('quinta-feira')) {
+    } else if (dateTextLower.includes('quinta')) {
         targetDate = getNextWeekday(4);
-    } else if (dateText.includes('sexta') || dateText.includes('sexta-feira')) {
+    } else if (dateTextLower.includes('sexta')) {
         targetDate = getNextWeekday(5);
-    } else if (dateText.includes('sábado')) {
+    } else if (dateTextLower.includes('sábado') || dateTextLower.includes('sabado')) {
         targetDate = getNextWeekday(6);
     } else {
-        // Tentar interpretar como data ISO se for formato diferente
+        // Tentar interpretar como data ISO
         const isoMatch = dateText.match(/\d{4}-\d{2}-\d{2}/);
         if (isoMatch) {
             targetDate = new Date(isoMatch[0]);
@@ -142,31 +233,48 @@ function parseTextDateTime(dateText, timeText) {
     
     // Interpretar hora
     let hours = 0, minutes = 0;
+    const timeTextLower = timeText.toLowerCase();
     
-    if (timeText.includes('manhã') || timeText.includes('manha')) {
-        hours = 9; // Padrão manhã
-    } else if (timeText.includes('tarde')) {
-        if (timeText.includes('3')) hours = 15;
-        else if (timeText.includes('2')) hours = 14;
-        else if (timeText.includes('4')) hours = 16;
-        else if (timeText.includes('5')) hours = 17;
-        else hours = 14; // Padrão tarde
+    // Primeiro, tentar padrões específicos
+    const hourMatch = timeText.match(/(\d{1,2}):(\d{2})/);
+    if (hourMatch) {
+        hours = parseInt(hourMatch[1]);
+        minutes = parseInt(hourMatch[2]);
     } else {
-        // Tentar extrair hora numérica
-        const hourMatch = timeText.match(/(\d{1,2})/);
-        if (hourMatch) {
-            hours = parseInt(hourMatch[1]);
-            const minuteMatch = timeText.match(/(\d{1,2}):(\d{2})/);
-            if (minuteMatch) {
-                hours = parseInt(minuteMatch[1]);
-                minutes = parseInt(minuteMatch[2]);
+        const simpleHourMatch = timeText.match(/(\d{1,2})h?(\d{2})?/);
+        if (simpleHourMatch) {
+            hours = parseInt(simpleHourMatch[1]);
+            minutes = simpleHourMatch[2] ? parseInt(simpleHourMatch[2]) : 0;
+        } else if (timeTextLower.includes('manhã') || timeTextLower.includes('manha')) {
+            hours = 9;
+        } else if (timeTextLower.includes('tarde')) {
+            // Verificar se tem número específico
+            if (timeTextLower.includes('3') || timeTextLower.includes('três') || timeTextLower.includes('tres')) {
+                hours = 15;
+            } else if (timeTextLower.includes('2') || timeTextLower.includes('duas')) {
+                hours = 14;
+            } else if (timeTextLower.includes('4') || timeTextLower.includes('quatro')) {
+                hours = 16;
+            } else if (timeTextLower.includes('5') || timeTextLower.includes('cinco')) {
+                hours = 17;
+            } else {
+                hours = 14; // Padrão tarde
             }
+        } else if (timeTextLower.includes('noite')) {
+            hours = 19;
         }
     }
     
+    // Definir a hora na data
     targetDate.setHours(hours, minutes, 0, 0);
     
-    console.log('Data interpretada:', targetDate.toString());
+    console.log('Data final interpretada:', {
+        original: { date: dateText, time: timeText },
+        parsed: targetDate.toString(),
+        iso: targetDate.toISOString(),
+        hours, minutes
+    });
+    
     return targetDate;
 }
 
@@ -386,7 +494,8 @@ async function handleScheduling(name, dateParam, timeParam) {
         console.log('timeParam type:', typeof timeParam, Array.isArray(timeParam) ? '[ARRAY]' : '[NOT ARRAY]');
         
         // 1. Validar entrada
-        const dateTimeValidation = validateDateTime(dateParam, timeParam);
+        const originalQuery = request.body.queryResult?.queryText || '';
+        const dateTimeValidation = validateDateTime(dateParam, timeParam, originalQuery);
         if (!dateTimeValidation.valid) {
             return { 
                 success: false, 
