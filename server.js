@@ -35,8 +35,11 @@ app.post("/webhook", async (request, response) => {
 });
 
 
-// --- FUNÇÃO PARA SALVAR NA PLANILHA (VERSÃO MAIS SEGURA) ---
+// --- FUNÇÃO PARA SALVAR NA PLANILHA (VERSÃO DE DEPURAÇÃO) ---
 async function saveToSheet(name, dateTime) {
+  // ***** PASSO DE DEPURAÇÃO: Imprime o valor recebido nos logs *****
+  console.log("Valor de 'dateTime' recebido do Dialogflow:", JSON.stringify(dateTime, null, 2));
+
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const sheetId = process.env.SHEET_ID;
 
@@ -48,14 +51,12 @@ async function saveToSheet(name, dateTime) {
 
   const dateString = (typeof dateTime === 'object' && dateTime.start) ? dateTime.start : dateTime;
   
-  // VERIFICAÇÃO DE SEGURANÇA 1: Garante que temos uma string de data para processar.
   if (!dateString) {
       throw new Error("O valor de 'date-time' recebido do Dialogflow está vazio.");
   }
 
   const dateObj = new Date(dateString);
   
-  // VERIFICAÇÃO DE SEGURANÇA 2: Garante que a data criada é válida.
   if (isNaN(dateObj.getTime())) {
     throw new Error(`O valor '${dateString}' não pôde ser convertido para uma data válida.`);
   }
