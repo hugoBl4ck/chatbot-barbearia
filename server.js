@@ -27,6 +27,7 @@ app.post("/webhook", async (request, response) => {
             const currentSession = request.body.session;
             const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
             responsePayload = createResponse(result.message, context);
+
         } else {
             responsePayload = createResponse("Webhook contatado, mas a intenção não é AgendarHorario.");
         }
@@ -39,10 +40,23 @@ app.post("/webhook", async (request, response) => {
 });
 
 // --- FUNÇÕES AUXILIARES ---
-function getPersonName(contexts) { /* ...código anterior sem mudanças... */ }
-function createResponse(text, context = null) { /* ...código anterior sem mudanças... */ }
+function getPersonName(contexts) {
+    if (!contexts || !contexts.length) return null;
+    const contextWithName = contexts.find(ctx => ctx.parameters && ctx.parameters["person.original"]);
+    return contextWithName ? contextWithName.parameters["person.original"] : null;
+}
 
-// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (REFEITA) ---
+function createResponse(text, context = null) {
+    const payload = {
+        fulfillmentMessages: [{ text: { text: [text] } }]
+    };
+    if (context) {
+        payload.outputContexts = [{ name: context, lifespanCount: 2 }];
+    }
+    return payload;
+}
+
+// --- FUNÇÃO PRINCIPAL DE AGENDAMENTO (CORRIGIDA PELO ESPECIALISTA) ---
 async function handleScheduling(name, dateParam, timeParam) {
     if (!dateParam || !timeParam) {
         return { success: false, message: "Por favor, informe uma data e hora completas." };
@@ -56,19 +70,17 @@ async function handleScheduling(name, dateParam, timeParam) {
         const requestedDate = new Date(dateTimeString);
         if (isNaN(requestedDate.getTime())) throw new Error("Data inválida");
 
-        // Autentica e carrega a planilha
         const doc = getDoc();
         await doc.useServiceAccountAuth(creds);
         await doc.loadInfo();
         const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
         const configSheet = doc.sheetsByTitle['Horarios'];
         
-        // **LÓGICA REFEITA E CENTRALIZADA EM 'Intl' PARA CONSISTÊNCIA**
-        // Obtém o dia da semana e a hora NO FUSO HORÁRIO DE SÃO PAULO
-        const weekdayFormatter = new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'short' });
-        const dayMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
-        const dayOfWeek = dayMap[weekdayFormatter.format(requestedDate)];
+        // **CORREÇÃO 2: Tratamento de Timezone Consistente**
+        // Usamos toLocaleString para garantir que o dia da semana seja o do Brasil
+        const dayOfWeek = new Date(requestedDate.toLocaleString("en-US", {timeZone: TIMEZONE})).getDay(); // Dom=0, Seg=1...
 
+        // Extrai a hora local de forma segura
         const hourFormatter = new Intl.DateTimeFormat('pt-BR', { timeZone: TIMEZONE, hour: 'numeric', minute: 'numeric', hour12: false });
         const timeString = hourFormatter.format(requestedDate);
         const [hours, minutes] = timeString.split(':').map(Number);
@@ -91,12 +103,9 @@ async function handleScheduling(name, dateParam, timeParam) {
         const isMorningValid = (requestedTime >= inicioManha && requestedTime < fimManha);
         const isAfternoonValid = (inicioTarde && requestedTime >= inicioTarde && requestedTime < fimTarde);
 
-        // Ajuste para horário de almoço e sábado (que termina no fim da "manhã")
-        if (dayOfWeek == 6) { // Sábado
-             if(!(requestedTime >= inicioManha && requestedTime < fimManha)) {
-                return { success: false, message: "Desculpe, estamos fechados neste horário. No sábado, funcionamos das 08:00 às 15:00." };
-             }
-        } else if (!isMorningValid && !isAfternoonValid) {
+        // **CORREÇÃO 1: Lógica de Verificação de Horários**
+        // Esta lógica agora é universal e correta para todos os dias
+        if (!isMorningValid && !isAfternoonValid) {
             return { success: false, message: "Desculpe, estamos fechados neste horário. Por favor, escolha outro." };
         }
 
@@ -131,5 +140,3 @@ async function handleScheduling(name, dateParam, timeParam) {
 const listener = app.listen(process.env.PORT, () => {
     console.log("Your app is listening on port " + listener.address().port);
 });
-
-// (Lembre-se de ter as funções getPersonName e createResponse aqui)
