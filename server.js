@@ -177,14 +177,22 @@ async function checkBusinessHours(date, db) {
     const dayConfig = doc.data();
     const timeToDecimal = (str) => { if (!str) return 0; const [h, m] = str.split(':').map(Number); return h + (m || 0) / 60; };
 
-    const isWithinHours = (time, start, end) => time >= timeToDecimal(start) && time < timeToDecimal(end);
+    const serviceDurationInHours = CONFIG.serviceDurationMinutes / 60;
+const isWithinHours = (time, start, end) => {
+    if (!start || !end) return false;
+    const startTime = timeToDecimal(start);
+    const endTime = timeToDecimal(end);
+    return time >= startTime && (time + serviceDurationInHours) <= endTime;
+};
     if (isWithinHours(requestedTime, dayConfig.InicioManha, dayConfig.FimManha) || isWithinHours(requestedTime, dayConfig.InicioTarde, dayConfig.FimTarde)) {
         return { isOpen: true };
     } else {
-        const morning = `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}`;
-        const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
-        return { isOpen: false, message: `Estamos abertos em ${dayName}, mas nosso horário é ${morning}${afternoon}.` };
-    }
+             const morning = `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}`;
+             const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
+    // A MUDANÇA ESTÁ AQUI: Transformamos a afirmação em uma pergunta útil.
+             const message = `O horário que você sugeriu está fora do nosso expediente. Em ${dayName}, nosso horário é ${morning}${afternoon}. Qual horário nesse período você gostaria de marcar?`;
+              return { isOpen: false, message: message };
+          }
 }
 
 async function checkConflicts(requestedDate, db) {
