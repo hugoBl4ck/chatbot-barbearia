@@ -260,10 +260,24 @@ function extractDateFromDialogflow(param) {
     if (dateString) { const date = new Date(dateString); return isNaN(date.getTime()) ? null : date; }
     return null;
 }
+function createResponse(text) {
+    const responsePayload = {
+        // Este é um campo legado, mas ainda muito útil para garantir compatibilidade.
+        fulfillmentText: text,
 
-function createResponse(text) { 
-    return { fulfillmentMessages: [{ text: { text: [text] } }] }; 
+        // Este é o formato moderno e correto.
+        fulfillmentMessages: [{
+            text: {
+                text: [text]
+            }
+        }],
+
+        // Especifica a fonte da resposta. Ajuda a evitar conflitos.
+        source: "webhook-barbearia-vercel"
+    };
+    return responsePayload;
 }
+
 
 function validateRequest(body) { 
     if (!body || !body.queryResult || !body.queryResult.intent || !body.queryResult.intent.displayName) { 
