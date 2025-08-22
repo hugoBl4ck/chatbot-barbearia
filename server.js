@@ -282,17 +282,18 @@ async function saveAppointment(name, requestedDate, scheduleSheet) {
     try {
         const isoDate = requestedDate.toISOString();
         const formattedDate = new Intl.DateTimeFormat('pt-BR', {
-            dateStyle: 'short',
+            dateStyle: 'full', // Use 'full' para "quinta-feira, 21 de agosto de 2025"
             timeStyle: 'short',
             timeZone: TIMEZONE
         }).format(requestedDate);
 
+        // ATENÇÃO: As chaves aqui DEVEM ser idênticas aos cabeçalhos da sua planilha
         await scheduleSheet.addRow({
-            Nome: name,
-            DataHora: isoDate,
-            DataFormatada: formattedDate,
+            NomeCliente: name,              // MUDOU de 'Nome'
+            DataHoraFormatada: formattedDate, // MUDOU de 'DataFormatada'
             Status: 'Agendado',
-            Criado: new Date().toISOString()
+            DataHoraISO: isoDate,           // MUDOU de 'DataHora'
+            TimestampAgendamento: new Date().toISOString() // MUDOU de 'Criado'
         });
         
         console.log(`✅ Agendamento salvo: ${name} - ${formattedDate}`);
