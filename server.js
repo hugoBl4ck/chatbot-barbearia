@@ -30,7 +30,6 @@ app.post("/webhook", async (request, response) => {
         let result;
 
         if (intent === "AgendarHorario") {
-            // Procura o parâmetro de data com diferentes nomes possíveis
             const dateTimeParam = allParams['date-time'] || 
                                  allParams['datetime'] || 
                                  allParams['data-hora'] || 
@@ -64,18 +63,6 @@ app.post("/webhook", async (request, response) => {
 
     } catch (error) {
         console.error("❌ Erro CRÍTICO no webhook:", error);
-        const responsePayload = createResponse("Houve um erro interno. Por favor, tente novamente.");
-        return response.json(responsePayload);
-    }
-});
-        
-        const currentSession = request.body.session;
-        const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
-        const responsePayload = createResponse(result.message, context);
-        return response.json(responsePayload);
-
-    } catch (error) {
-        console.error("Erro CRÍTICO no webhook:", error);
         const responsePayload = createResponse("Houve um erro interno. Por favor, tente novamente.");
         return response.json(responsePayload);
     }
