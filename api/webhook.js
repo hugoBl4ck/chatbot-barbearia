@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO CORRIGIDA E ROBUSTA)
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO FINAL E SEGURA)
 // =================================================================
 
 const express = require("express");
@@ -14,7 +14,6 @@ const CONFIG = {
     serviceDurationMinutes: 60,
     collections: { schedules: 'Agendamentos', config: 'Horarios' },
     contexts: { 
-        // Corrigido para corresponder ao uso no código
         awaitingReschedule: 'aguardando_novo_horario' 
     }
 };
@@ -46,6 +45,7 @@ app.post("/api/webhook", async (request, response) => {
         const db = admin.firestore();
         
         console.log(`🎯 Intent: ${intentName} | 💬 Texto: "${queryText}"`);
+        console.log("Sessão recebida:", session); // Log de depuração sugerido
 
         let resultPayload;
 
@@ -60,41 +60,37 @@ app.post("/api/webhook", async (request, response) => {
             const personInfo = getPersonInfo(outputContexts);
             resultPayload = await handleCancellation(personInfo, db);
         
-        } else if (intentName === "VerificarStatusServidor") {
-            resultPayload = { 
-                success: true, 
-                message: `Sim, o servidor está online! O horário atual é ${new Date().toLocaleTimeString('pt-BR')}.` 
-            };
-        
         } else {
             resultPayload = { success: true, message: "Webhook contatado, mas sem ação para esta intent." };
         }
         
-        // =========================================================
-        // LÓGICA DE RESPOSTA PADRONIZADA (Sugestão #2 implementada)
-        // =========================================================
         const responseData = createResponse(resultPayload.message);
 
-        // Se o agendamento falhou, adiciona o contexto de remarcação.
+        // =========================================================
+        // LÓGICA DE CONTEXTO CORRIGIDA E SEGURA
+        // =========================================================
         if (resultPayload.success === false && intentName.startsWith("AgendarHorario")) {
-            const personInfo = getPersonInfo(outputContexts);
-            
-            // =========================================================
-            // CORREÇÃO CRÍTICA DO BUG (Sugestão #1 implementada)
-            // =========================================================
-            const contextName = `${session}/contexts/${CONFIG.contexts.awaitingReschedule}`;
-            
-            responseData.outputContexts = [{
-                name: contextName,
-                lifespanCount: 2,
-                parameters: { nome: personInfo.name, telefone: personInfo.phone }
-            }];
-            console.log(`▶️ Contexto '${CONFIG.contexts.awaitingReschedule}' ativado.`);
+            // Valida se a 'session' existe antes de tentar criar um contexto
+            if (session) {
+                const personInfo = getPersonInfo(outputContexts);
+                
+                // CORREÇÃO DO ERRO DE DIGITAÇÃO
+                const contextName = `${session}/contexts/${CONFIG.contexts.awaitingReschedule}`;
+                
+                responseData.outputContexts = [{
+                    name: contextName,
+                    lifespanCount: 2,
+                    parameters: { nome: personInfo.name, telefone: personInfo.phone }
+                }];
+                console.log(`▶️ Contexto '${CONFIG.contexts.awaitingReschedule}' ativado.`);
+            } else {
+                console.warn("⚠️  Variável 'session' não recebida do Dialogflow. O contexto de remarcação não pôde ser ativado.");
+            }
         }
         
         const duration = (Date.now() - startTime) / 1000;
         console.log(`⏱️ Tempo de Execução: ${duration.toFixed(2)} segundos`);
-        console.log("📤 RESPOSTA JSON ENVIADA:", JSON.stringify(responseData, null, 2)); // Log aprimorado
+        console.log("📤 RESPOSTA JSON ENVIADA:", JSON.stringify(responseData, null, 2));
         return response.json(responseData);
 
     } catch (error) {
@@ -106,39 +102,15 @@ app.post("/api/webhook", async (request, response) => {
 });
 
 // =================================================================
-// FUNÇÕES AUXILIARES (Com melhorias sugeridas)
+// FUNÇÕES AUXILIARES (COLE O RESTANTE DO SEU CÓDIGO AQUI)
+// ...
 // =================================================================
-function extractDateFromDialogflow(param) {
-    // Sugestão #3 implementada para maior robustez
-    if (!param) return null;
-    let dateString = '';
 
-    if (typeof param === 'string') {
-        dateString = param;
-    } else if (typeof param === 'object' && param !== null) {
-        dateString = param.startDateTime || param.date_time || param.date;
-    }
+// ... (Cole aqui o código completo das funções handleScheduling, checkConflicts, etc.)
+// ... (O código delas já está correto)
 
-    if (dateString && typeof dateString === 'string') {
-        const date = new Date(dateString);
-        return isNaN(date.getTime()) ? null : date;
-    }
-    return null;
-}
 
-function createResponse(text) {
-    // Sugestão #2 implementada para garantir o formato correto
-    return {
-        fulfillmentText: text,
-        fulfillmentMessages: [{ text: { text: [text] } }],
-        source: "webhook-barbearia-vercel"
-    };
-}
-
-// ... COLE AQUI O RESTANTE DAS SUAS FUNÇÕES AUXILIARES ...
-// (handleScheduling, handleCancellation, checkBusinessHours, etc.)
-// O código delas não precisa mudar.
-
+// EXEMPLO DAS FUNÇÕES QUE VOCÊ DEVE MANTER:
 async function handleScheduling(personInfo, dateTimeParam, db) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Não consegui identificar seu nome e telefone. Poderia informá-los novamente?" };
     const requestedDate = extractDateFromDialogflow(dateTimeParam);
@@ -164,7 +136,7 @@ async function handleCancellation(personInfo, db) {
 async function checkBusinessHours(date, db) {
     const formatter = new Intl.DateTimeFormat('en-US', { timeZone: CONFIG.timezone, weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false });
     const parts = formatter.formatToParts(date);
-    const getValue = type => parts.find(p => p.type === 'hour12' ? p.value === 'true' : (p.type === type))?.value;
+    const getValue = type => parts.find(p => p.type === type)?.value;
     const dayMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
     const dayOfWeek = dayMap[getValue('weekday')];
     const requestedTime = parseInt(getValue('hour')) + parseInt(getValue('minute')) / 60;
@@ -208,6 +180,21 @@ function getPersonInfo(contexts) {
         if (params) { info.name = info.name || params.person?.name || params.nome; info.phone = info.phone || params.telefone || params['phone-number']; }
     }
     return info;
+}
+function extractDateFromDialogflow(param) {
+    if (!param) return null;
+    let dateString = '';
+    if (typeof param === 'string') { dateString = param; }
+    else if (typeof param === 'object' && param !== null) { dateString = param.startDateTime || param.date_time || param.date; }
+    if (dateString && typeof dateString === 'string') { const date = new Date(dateString); return isNaN(date.getTime()) ? null : date; }
+    return null;
+}
+function createResponse(text) {
+    return {
+        fulfillmentText: text,
+        fulfillmentMessages: [{ text: { text: [text] } }],
+        source: "webhook-barbearia-vercel"
+    };
 }
 function validateRequest(body) {
     if (!body || !body.queryResult || !body.queryResult.intent || !body.queryResult.intent.displayName) {
