@@ -48,6 +48,8 @@ app.post("/webhook", async (request, response) => {
     try {
         console.log("\n🔄 === NOVO REQUEST WEBHOOK ===");
         validateRequest(request.body);
+        
+        console.log("DADOS COMPLETOS RECEBIDOS:", JSON.stringify(request.body, null, 2));
 
         const { intent, parameters, queryText, session, outputContexts } = request.body.queryResult;
         const intentName = intent.displayName;
