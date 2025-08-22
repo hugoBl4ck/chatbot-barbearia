@@ -1,446 +1,289 @@
-// Importar as bibliotecas necessárias
+// =================================================================
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA
+// =================================================================
+
+// --- Dependências ---
 const express = require("express");
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 
+// --- Configuração da Aplicação ---
 const app = express();
 app.use(express.json());
 
-// --- CONFIGURAÇÃO ---
-const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
-const sheetId = process.env.SHEET_ID;
-const TIMEZONE = 'America/Buenos_Aires';
-const SERVICE_DURATION_MINUTES = 60;
+// =================================================================
+// CONFIGURAÇÕES GERAIS - (ALTERE APENAS AQUI)
+// =================================================================
+const CONFIG = {
+    // Credenciais e ID da Planilha (puxados do ambiente)
+    creds: JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}'),
+    sheetId: process.env.SHEET_ID,
 
-// Validação de ambiente no início para evitar erros silenciosos
+    // Configurações de Agendamento
+    timezone: 'America/Sao_Paulo', // ATENÇÃO: Use o fuso horário correto do Brasil
+    serviceDurationMinutes: 60,
+
+    // Nomes das Planilhas (Sheets)
+    sheetNames: {
+        schedules: 'Agendamentos Barbearia',
+        config: 'Horarios',
+    },
+
+    // Mapeamento dos Nomes das Colunas na Planilha "Agendamentos Barbearia"
+    // As chaves aqui DEVEM ser idênticas aos cabeçalhos da sua planilha.
+    columnNames: {
+        clientName: 'NomeCliente',
+        formattedDate: 'DataHoraFormatada',
+        status: 'Status',
+        isoDate: 'DataHoraISO',
+        timestamp: 'TimestampAgendamento',
+    }
+};
+
+// =================================================================
+// INICIALIZAÇÃO E VALIDAÇÃO
+// =================================================================
 validateEnvironment();
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Webhook da barbearia rodando na porta ${PORT}`);
+    console.log(`🌍 Fuso horário configurado: ${CONFIG.timezone}`);
+});
 
-// --- FUNÇÃO PRINCIPAL DO WEBHOOK ---
+// =================================================================
+// ROTA PRINCIPAL DO WEBHOOK (RECEBE DADOS DO DIALOGFLOW)
+// =================================================================
 app.post("/webhook", async (request, response) => {
     try {
         console.log("\n🔄 === NOVO REQUEST WEBHOOK ===");
-        console.log("🎯 Intent:", request.body.queryResult?.intent?.displayName);
-        console.log("💬 Texto:", request.body.queryResult?.queryText);
-        
-        validateRequest(request);
+        validateRequest(request.body);
+
         const intent = request.body.queryResult.intent.displayName;
-        const allParams = request.body.queryResult.parameters;
+        const parameters = request.body.queryResult.parameters;
         
-        console.log("📋 Parâmetros:", JSON.stringify(allParams, null, 2));
-        
+        console.log(`🎯 Intent: ${intent} | 💬 Texto: "${request.body.queryResult.queryText}"`);
+        console.log("📋 Parâmetros Recebidos:", JSON.stringify(parameters, null, 2));
+
         let result;
 
         if (intent === "AgendarHorario") {
-            const dateTimeParam = allParams['date-time'] || 
-                                 allParams['datetime'] || 
-                                 allParams['data-hora'] || 
-                                 allParams['time'] ||
-                                 allParams['horario'];
-            
-            console.log("🕐 Parâmetro de data/hora encontrado:", JSON.stringify(dateTimeParam, null, 2));
+            const dateTimeParam = parameters['date-time'];
             
             if (!dateTimeParam) {
-                console.log("❌ Nenhum parâmetro de data encontrado!");
-                console.log("Parâmetros disponíveis:", Object.keys(allParams));
-                return response.json(createResponse("Por favor, me informe quando você gostaria de agendar. Exemplo: 'sexta-feira às 9 da manhã' ou 'amanhã às 14 horas'."));
+                console.log("❌ Nenhum parâmetro de data/hora encontrado.");
+                return response.json(createResponse("Não entendi a data. Por favor, diga o dia e a hora, como 'amanhã às 15h'."));
             }
             
-            const personName = getPersonName(request.body.queryResult.outputContexts);
-            console.log("👤 Nome da pessoa:", personName);
-            
-            result = await handleScheduling(personName || "Cliente", dateTimeParam);
+            const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
+            result = await handleScheduling(personName, dateTimeParam);
         } else {
             result = { success: true, message: "Webhook contatado, mas a intenção não é de agendamento." };
         }
         
-        const currentSession = request.body.session;
-        const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
-        const responsePayload = createResponse(result.message, context);
-        
-        console.log("📤 Resposta enviada:", result.message);
-        console.log("=== FIM REQUEST ===\n");
-        
-        return response.json(responsePayload);
+        console.log(`📤 Resposta Enviada: "${result.message}"`);
+        return response.json(createResponse(result.message));
 
     } catch (error) {
         console.error("❌ Erro CRÍTICO no webhook:", error);
-        const responsePayload = createResponse("Houve um erro interno. Por favor, tente novamente.");
-        return response.json(responsePayload);
+        return response.json(createResponse("Desculpe, ocorreu um erro interno. Por favor, tente novamente."));
+    } finally {
+        console.log("=== FIM REQUEST ===\n");
     }
 });
 
-// --- LÓGICA PRINCIPAL DE AGENDAMENTO ---
+// =================================================================
+// LÓGICA PRINCIPAL DE AGENDAMENTO
+// =================================================================
 async function handleScheduling(name, dateTimeParam) {
-    console.log("📅 Parâmetro date-time recebido:", JSON.stringify(dateTimeParam, null, 2));
-    
-    let requestedDate;
-    
-    // Para @sys.date-time do Dialogflow, a estrutura é: { "date_time": "2025-08-22T09:00:00-03:00" }
-    if (typeof dateTimeParam === 'string') {
-        // Se for uma string ISO direta
-        requestedDate = new Date(dateTimeParam);
-    } else if (dateTimeParam && typeof dateTimeParam === 'object') {
-        // O formato específico do seu Dialogflow
-        if (dateTimeParam.date_time) {
-            requestedDate = new Date(dateTimeParam.date_time);
-            console.log("✅ Usando dateTimeParam.date_time:", dateTimeParam.date_time);
-        } else if (dateTimeParam.startDateTime) {
-            requestedDate = new Date(dateTimeParam.startDateTime);
-        } else if (dateTimeParam.start) {
-            requestedDate = new Date(dateTimeParam.start);
-        } else if (dateTimeParam.endDateTime) {
-            requestedDate = new Date(dateTimeParam.endDateTime);
-        } else {
-            // Tenta converter o objeto inteiro para string e depois para data
-            const dateStr = Object.values(dateTimeParam)[0];
-            if (dateStr) {
-                requestedDate = new Date(dateStr);
-            }
-        }
+    // 1. Extrair e validar a data do parâmetro do Dialogflow
+    const requestedDate = extractDateFromDialogflow(dateTimeParam);
+    if (!requestedDate) {
+        return { success: false, message: "Não consegui entender a data e hora. Por favor, tente um formato como 'sexta-feira às 9 da manhã' ou 'amanhã às 14 horas'." };
     }
+    console.log(`✅ Data extraída com sucesso: ${requestedDate.toISOString()}`);
 
-    if (!requestedDate || isNaN(requestedDate.getTime())) {
-        console.log("❌ Não foi possível extrair data válida do parâmetro");
-        return { 
-            success: false, 
-            message: "Não consegui entender a data e hora. Por favor, tente com um formato mais específico como 'sexta-feira às 9 da manhã' ou 'amanhã às 14 horas'." 
-        };
-    }
-
-    console.log("✅ Data processada com sucesso:", requestedDate.toISOString());
-    console.log("✅ Data local:", requestedDate.toString());
-
-    const now = new Date();
-    if (requestedDate <= now) {
-        console.log("❌ Data no passado:", requestedDate, "vs agora:", now);
+    // 2. Verificar se a data não está no passado
+    if (requestedDate <= new Date()) {
         return { success: false, message: "Não é possível agendar para um horário que já passou. Por favor, escolha uma data e hora futura." };
     }
-    
-    try {
-        const doc = new GoogleSpreadsheet(sheetId);
-        await doc.useServiceAccountAuth(creds);
-        await doc.loadInfo();
-        const scheduleSheet = doc.sheetsByTitle['Agendamentos Barbearia'];
-        const configSheet = doc.sheetsByTitle['Horarios'];
 
-        if (!scheduleSheet || !configSheet) {
-            throw new Error("Planilhas 'Agendamentos Barbearia' ou 'Horarios' não encontradas.");
-        }
+    // 3. Conectar à Planilha Google Sheets
+    const doc = new GoogleSpreadsheet(CONFIG.sheetId);
+    await doc.useServiceAccountAuth(CONFIG.creds);
+    await doc.loadInfo();
 
-        const { isOpen, dayName } = await checkBusinessHours(requestedDate, configSheet);
-        if (!isOpen) {
-            return { success: false, message: `Desculpe, não funcionamos em ${dayName}. Por favor, escolha outro dia.` };
-        }
+    const scheduleSheet = doc.sheetsByTitle[CONFIG.sheetNames.schedules];
+    const configSheet = doc.sheetsByTitle[CONFIG.sheetNames.config];
 
-        const hasConflict = await checkConflicts(requestedDate, scheduleSheet);
-        if (hasConflict) {
-            return { success: false, message: "Este horário já está ocupado ou conflita com outro agendamento. Por favor, escolha outro." };
-        }
-        
-        const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { 
-            dateStyle: 'full', 
-            timeStyle: 'short', 
-            timeZone: TIMEZONE 
-        }).format(requestedDate);
-        
-        await saveAppointment(name, requestedDate, scheduleSheet);
-        
-        return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
-    } catch (error) {
-        console.error("Erro no agendamento:", error);
-        return { success: false, message: "Erro ao processar o agendamento. Tente novamente." };
+    if (!scheduleSheet || !configSheet) {
+        throw new Error(`Planilhas '${CONFIG.sheetNames.schedules}' ou '${CONFIG.sheetNames.config}' não encontradas.`);
     }
+
+    // 4. Verificar se a barbearia está aberta no horário solicitado
+    const businessHoursCheck = await checkBusinessHours(requestedDate, configSheet);
+    if (!businessHoursCheck.isOpen) {
+        return { success: false, message: businessHoursCheck.message };
+    }
+
+    // 5. Verificar se o horário já está ocupado
+    const hasConflict = await checkConflicts(requestedDate, scheduleSheet);
+    if (hasConflict) {
+        return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
+    }
+
+    // 6. Salvar o agendamento na planilha
+    await saveAppointment(name, requestedDate, scheduleSheet);
+    
+    // 7. Formatar a mensagem de sucesso para o usuário
+    const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { 
+        dateStyle: 'full', 
+        timeStyle: 'short', 
+        timeZone: CONFIG.timezone 
+    }).format(requestedDate);
+    
+    return { success: true, message: `Perfeito, ${name}! Seu agendamento foi confirmado para ${formattedDateForUser}.` };
 }
 
-// --- FUNÇÕES UTILITÁRIAS ---
+// =================================================================
+// FUNÇÕES UTILITÁRIAS
+// =================================================================
 
-async function checkBusinessHours(date, configSheet) {
-    try {
-        // A forma mais segura de obter os componentes da data no fuso horário local
-        const formatter = new Intl.DateTimeFormat('en-US', {
-            timeZone: TIMEZONE,
-            weekday: 'short',
-            hour: 'numeric',
-            minute: 'numeric',
-            hour12: false
-        });
+/** Extrai um objeto Date do parâmetro vindo do Dialogflow. */
+function extractDateFromDialogflow(param) {
+    if (!param) return null;
 
-        const parts = formatter.formatToParts(date);
-        const getValue = type => parts.find(p => p.type === type)?.value;
-
-        const dayMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
-        const dayOfWeek = dayMap[getValue('weekday')];
-        const requestedTime = parseInt(getValue('hour')) + parseInt(getValue('minute')) / 60;
-        
-        const dayName = new Intl.DateTimeFormat('pt-BR', { 
-            weekday: 'long', 
-            timeZone: TIMEZONE 
-        }).format(date);
-        
-        const configRows = await configSheet.getRows();
-        const dayConfig = configRows.find(row => parseInt(row.DiaDaSemana) === dayOfWeek);
-
-        if (!dayConfig || !dayConfig.InicioManha) {
-            return { isOpen: false, dayName };
-        }
-
-        const timeToDecimal = (str) => {
-            if (!str) return 0;
-            const [hours, minutes] = str.split(':').map(Number);
-            return hours + (minutes || 0) / 60;
-        };
-        
-        const inicioManha = timeToDecimal(dayConfig.InicioManha);
-        const fimManha = timeToDecimal(dayConfig.FimManha);
-
-        if (requestedTime >= inicioManha && requestedTime < fimManha) {
-            return { isOpen: true, dayName };
-        }
-        
-        if (dayConfig.InicioTarde && dayConfig.FimTarde) {
-            const inicioTarde = timeToDecimal(dayConfig.InicioTarde);
-            const fimTarde = timeToDecimal(dayConfig.FimTarde);
-            if (requestedTime >= inicioTarde && requestedTime < fimTarde) {
-                return { isOpen: true, dayName };
-            }
-        }
-        
-        return { isOpen: false, dayName };
-    } catch (error) {
-        console.error("Erro ao verificar horário de funcionamento:", error);
-        return { isOpen: false, dayName: "desconhecido" };
-    }
-}
-
-function validateEnvironment() {
-    const requiredEnvVars = ['GOOGLE_CREDENTIALS', 'SHEET_ID'];
-    const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
-    
-    if (missingVars.length > 0) {
-        console.error(`❌ Variáveis de ambiente faltando: ${missingVars.join(', ')}`);
-        process.exit(1);
+    let dateString = '';
+    if (typeof param === 'string') {
+        dateString = param;
+    } else if (typeof param === 'object' && param !== null) {
+        dateString = param.date_time || param.startDateTime || param.start;
     }
     
-    try {
-        JSON.parse(process.env.GOOGLE_CREDENTIALS);
-    } catch (error) {
-        console.error('❌ GOOGLE_CREDENTIALS não é um JSON válido');
-        process.exit(1);
+    if (dateString) {
+        const date = new Date(dateString);
+        return isNaN(date.getTime()) ? null : date;
     }
-    
-    console.log('✅ Variáveis de ambiente configuradas corretamente');
-}
-
-function validateRequest(request) {
-    if (!request.body) {
-        throw new Error("Body da requisição está vazio");
-    }
-    
-    if (!request.body.queryResult) {
-        throw new Error("queryResult não encontrado no body");
-    }
-    
-    if (!request.body.queryResult.intent) {
-        throw new Error("Intent não encontrada no queryResult");
-    }
-    
-    if (!request.body.session) {
-        throw new Error("Session não encontrada no body");
-    }
-}
-
-async function checkConflicts(requestedDate, scheduleSheet) {
-    try {
-        console.log("🔍 Verificando conflitos de horário...");
-        const rows = await scheduleSheet.getRows();
-        const serviceDurationMs = SERVICE_DURATION_MINUTES * 60 * 1000;
-        const requestedStart = requestedDate.getTime();
-        const requestedEnd = requestedStart + serviceDurationMs;
-
-        console.log(`- Horário solicitado: de ${new Date(requestedStart).toISOString()} a ${new Date(requestedEnd).toISOString()}`);
-
-        for (const row of rows) {
-            // *** A CORREÇÃO PRINCIPAL ESTÁ AQUI ***
-            // Usar a coluna correta 'DataHoraISO' para ler os agendamentos existentes
-            if (!row.DataHoraISO) {
-                continue; // Pula linhas que não têm um agendamento válido
-            }
-
-            const existingDate = new Date(row.DataHoraISO); // Usa a coluna correta
-            if (isNaN(existingDate.getTime())) {
-                continue; // Pula datas inválidas na planilha
-            }
-
-            const existingStart = existingDate.getTime();
-            const existingEnd = existingStart + serviceDurationMs;
-
-            // Sua lógica de sobreposição (que já estava correta)
-            // Verifica se o novo agendamento (requested) sobrepõe o existente (existing)
-            const hasOverlap = (requestedStart < existingEnd) && (requestedEnd > existingStart);
-            
-            if (hasOverlap) {
-                console.log(`💥 CONFLITO ENCONTRADO com agendamento das ${existingDate.toISOString()}`);
-                return true; // Conflito encontrado, horário indisponível
-            }
-        }
-
-        console.log("✅ Nenhum conflito encontrado. Horário disponível.");
-        return false; // Nenhum conflito, horário disponível
-
-    } catch (error) {
-        console.error("Erro ao verificar conflitos:", error);
-        return true; // Em caso de erro, assume conflito por segurança para não agendar errado
-    }
-}
-
-async function saveAppointment(name, requestedDate, scheduleSheet) {
-    try {
-        const isoDate = requestedDate.toISOString();
-        const formattedDate = new Intl.DateTimeFormat('pt-BR', {
-            dateStyle: 'full', // Use 'full' para "quinta-feira, 21 de agosto de 2025"
-            timeStyle: 'short',
-            timeZone: TIMEZONE
-        }).format(requestedDate);
-
-        // ATENÇÃO: As chaves aqui DEVEM ser idênticas aos cabeçalhos da sua planilha
-        await scheduleSheet.addRow({
-            NomeCliente: name,              // MUDOU de 'Nome'
-            DataHoraFormatada: formattedDate, // MUDOU de 'DataFormatada'
-            Status: 'Agendado',
-            DataHoraISO: isoDate,           // MUDOU de 'DataHora'
-            TimestampAgendamento: new Date().toISOString() // MUDOU de 'Criado'
-        });
-        
-        console.log(`✅ Agendamento salvo: ${name} - ${formattedDate}`);
-    } catch (error) {
-        console.error("Erro ao salvar agendamento:", error);
-        throw error;
-    }
-}
-
-function getPersonName(contexts) {
-    if (!contexts || !Array.isArray(contexts)) {
-        return null;
-    }
-    
-    for (const context of contexts) {
-        if (context.parameters) {
-            // Procura por person.name (formato do seu Dialogflow)
-            if (context.parameters.person && context.parameters.person.name) {
-                return context.parameters.person.name;
-            }
-            
-            // Fallback: procura em qualquer contexto por um parâmetro de nome
-            const nameFields = ['name', 'nome', 'person-name', 'given-name', 'person'];
-            for (const field of nameFields) {
-                if (context.parameters[field]) {
-                    // Se for um objeto, procura pela propriedade name
-                    if (typeof context.parameters[field] === 'object' && context.parameters[field].name) {
-                        return context.parameters[field].name;
-                    }
-                    // Se for string diretamente
-                    if (typeof context.parameters[field] === 'string') {
-                        return context.parameters[field];
-                    }
-                }
-            }
-        }
-    }
-    
     return null;
 }
 
-function createResponse(text, context = null) {
-    const response = {
-        fulfillmentText: text,
-        fulfillmentMessages: [
-            {
-                text: {
-                    text: [text]
-                }
-            }
-        ]
+/** Verifica se a data e hora solicitadas estão dentro do horário de funcionamento. */
+async function checkBusinessHours(date, configSheet) {
+    const formatter = new Intl.DateTimeFormat('en-US', { timeZone: CONFIG.timezone, weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false });
+    const parts = formatter.formatToParts(date);
+    const getValue = type => parts.find(p => p.type === type)?.value;
+
+    const dayMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
+    const dayOfWeek = dayMap[getValue('weekday')];
+    const requestedTime = parseInt(getValue('hour')) + parseInt(getValue('minute')) / 60;
+    
+    const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: CONFIG.timezone }).format(date);
+    
+    const configRows = await configSheet.getRows();
+    const dayConfig = configRows.find(row => parseInt(row.DiaDaSemana) === dayOfWeek);
+
+    const timeToDecimal = (str) => {
+        if (!str) return 0;
+        const [hours, minutes] = str.split(':').map(Number);
+        return hours + (minutes || 0) / 60;
     };
     
-    if (context) {
-        response.outputContexts = [
-            {
-                name: context,
-                lifespanCount: 5,
-                parameters: {}
-            }
-        ];
+    if (!dayConfig || !dayConfig.InicioManha) {
+        return { isOpen: false, message: `Desculpe, não funcionamos em ${dayName}.` };
     }
     
-    return response;
+    const isWithinHours = (time, start, end) => time >= timeToDecimal(start) && time < timeToDecimal(end);
+
+    if (isWithinHours(requestedTime, dayConfig.InicioManha, dayConfig.FimManha) || isWithinHours(requestedTime, dayConfig.InicioTarde, dayConfig.FimTarde)) {
+        return { isOpen: true };
+    } else {
+        const morningHours = `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}`;
+        const afternoonHours = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
+        return { isOpen: false, message: `Estamos abertos em ${dayName}, mas nosso horário é ${morningHours}${afternoonHours}.` };
+    }
 }
 
-// Endpoint para debug mais detalhado - ver EXATAMENTE o que chega
-app.post("/debug-detailed", (req, res) => {
-    console.log("\n=== DEBUG DETALHADO ===");
-    console.log("🔍 Request Headers:", JSON.stringify(req.headers, null, 2));
-    console.log("🔍 Request Body:", JSON.stringify(req.body, null, 2));
-    
-    if (req.body.queryResult) {
-        console.log("🔍 Query Result:", JSON.stringify(req.body.queryResult, null, 2));
-        console.log("🔍 Parameters:", JSON.stringify(req.body.queryResult.parameters, null, 2));
-        console.log("🔍 Query Text:", req.body.queryResult.queryText);
-        console.log("🔍 Intent:", req.body.queryResult.intent?.displayName);
+/** Verifica se o horário solicitado sobrepõe algum agendamento existente. */
+async function checkConflicts(requestedDate, scheduleSheet) {
+    console.log("🔍 Verificando conflitos de horário...");
+    const rows = await scheduleSheet.getRows();
+    const serviceDurationMs = CONFIG.serviceDurationMinutes * 60 * 1000;
+    const requestedStart = requestedDate.getTime();
+    const requestedEnd = requestedStart + serviceDurationMs;
+
+    console.log(`- Horário solicitado: de ${new Date(requestedStart).toISOString()} a ${new Date(requestedEnd).toISOString()}`);
+
+    for (const row of rows) {
+        // Usa o nome da coluna do objeto CONFIG para ler a data
+        const existingDateStr = row[CONFIG.columnNames.isoDate];
+        if (!existingDateStr) continue;
         
-        // Verifica especificamente o parâmetro date-time
-        const dateTimeParam = req.body.queryResult.parameters?.['date-time'];
-        if (dateTimeParam) {
-            console.log("🔍 ENCONTROU date-time:", JSON.stringify(dateTimeParam, null, 2));
-            console.log("🔍 Tipo do date-time:", typeof dateTimeParam);
-        } else {
-            console.log("❌ NÃO ENCONTROU parâmetro date-time");
-            console.log("📋 Parâmetros disponíveis:", Object.keys(req.body.queryResult.parameters || {}));
+        const existingDate = new Date(existingDateStr);
+        if (isNaN(existingDate.getTime())) continue;
+        
+        const existingStart = existingDate.getTime();
+        const existingEnd = existingStart + serviceDurationMs;
+
+        // Lógica de sobreposição: um intervalo se sobrepõe a outro se ele começa antes do outro terminar,
+        // e termina depois do outro começar.
+        const hasOverlap = (requestedStart < existingEnd) && (requestedEnd > existingStart);
+        
+        if (hasOverlap) {
+            console.log(`💥 CONFLITO ENCONTRADO com agendamento das ${existingDate.toISOString()}`);
+            return true; // Conflito encontrado
         }
     }
     
-    console.log("=== FIM DEBUG ===\n");
-    
-    res.json({
-        message: "Debug completo no console",
-        hasDateTime: !!req.body.queryResult?.parameters?.['date-time'],
-        allParameters: req.body.queryResult?.parameters || {},
-        queryText: req.body.queryResult?.queryText,
-        intent: req.body.queryResult?.intent?.displayName
-    });
-});
+    console.log("✅ Nenhum conflito encontrado. Horário disponível.");
+    return false; // Nenhum conflito
+}
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        timestamp: new Date().toISOString(),
-        timezone: TIMEZONE 
-    });
-});
+/** Salva o novo agendamento na planilha. */
+async function saveAppointment(name, requestedDate, scheduleSheet) {
+    const newRow = {
+        [CONFIG.columnNames.clientName]: name,
+        [CONFIG.columnNames.isoDate]: requestedDate.toISOString(),
+        [CONFIG.columnNames.formattedDate]: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: CONFIG.timezone }).format(requestedDate),
+        [CONFIG.columnNames.status]: 'Agendado',
+        [CONFIG.columnNames.timestamp]: new Date().toISOString()
+    };
+    await scheduleSheet.addRow(newRow);
+    console.log(`✅ Agendamento salvo na planilha para: ${name}`);
+}
 
-// Endpoint para testar conexão com Google Sheets
-app.get('/test-sheets', async (req, res) => {
-    try {
-        const doc = new GoogleSpreadsheet(sheetId);
-        await doc.useServiceAccountAuth(creds);
-        await doc.loadInfo();
-        
-        res.json({
-            success: true,
-            title: doc.title,
-            sheets: Object.keys(doc.sheetsByTitle)
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+/** Extrai o nome da pessoa dos contextos do Dialogflow. */
+function getPersonName(contexts) {
+    if (!contexts) return null;
+    for (const context of contexts) {
+        if (context.parameters?.person?.name) return context.parameters.person.name;
+        if (context.parameters?.name) return context.parameters.name;
     }
-});
+    return null;
+}
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Webhook da barbearia rodando na porta ${PORT}`);
-    console.log(`📋 Health check disponível em: http://localhost:${PORT}/health`);
-    console.log(`🧪 Teste de planilhas em: http://localhost:${PORT}/test-sheets`);
-    console.log(`🐛 Debug detalhado em: http://localhost:${PORT}/debug-detailed`);
-});
+/** Cria o objeto de resposta padrão para o Dialogflow. */
+function createResponse(text) {
+    return {
+        fulfillmentMessages: [{ text: { text: [text] } }]
+    };
+}
+
+/** Valida as variáveis de ambiente essenciais. */
+function validateEnvironment() {
+    if (!process.env.GOOGLE_CREDENTIALS || !process.env.SHEET_ID) {
+        console.error('❌ Variáveis de ambiente GOOGLE_CREDENTIALS ou SHEET_ID faltando.');
+        process.exit(1);
+    }
+    try {
+        JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    } catch (e) {
+        console.error('❌ GOOGLE_CREDENTIALS não é um JSON válido.');
+        process.exit(1);
+    }
+    console.log('✅ Variáveis de ambiente configuradas corretamente.');
+}
+
+/** Valida a estrutura básica da requisição do Dialogflow. */
+function validateRequest(body) {
+    if (!body?.queryResult?.intent?.displayName) {
+        throw new Error("Requisição do Dialogflow inválida ou incompleta.");
+    }
+}
