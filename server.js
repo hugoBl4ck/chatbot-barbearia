@@ -17,16 +17,15 @@ validateEnvironment();
 // --- FUNÇÃO PRINCIPAL DO WEBHOOK ---
 app.post("/webhook", async (request, response) => {
     try {
-        console.log("🔄 Request completo recebido:");
-        console.log("Headers:", request.headers);
-        console.log("Body:", JSON.stringify(request.body, null, 2));
+        console.log("\n🔄 === NOVO REQUEST WEBHOOK ===");
+        console.log("🎯 Intent:", request.body.queryResult?.intent?.displayName);
+        console.log("💬 Texto:", request.body.queryResult?.queryText);
         
         validateRequest(request);
         const intent = request.body.queryResult.intent.displayName;
         const allParams = request.body.queryResult.parameters;
         
-        console.log("🎯 Intent detectada:", intent);
-        console.log("📋 Todos os parâmetros:", JSON.stringify(allParams, null, 2));
+        console.log("📋 Parâmetros:", JSON.stringify(allParams, null, 2));
         
         let result;
 
@@ -46,11 +45,29 @@ app.post("/webhook", async (request, response) => {
                 return response.json(createResponse("Por favor, me informe quando você gostaria de agendar. Exemplo: 'sexta-feira às 9 da manhã' ou 'amanhã às 14 horas'."));
             }
             
-            const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
-            result = await handleScheduling(personName, dateTimeParam);
+            const personName = getPersonName(request.body.queryResult.outputContexts);
+            console.log("👤 Nome da pessoa:", personName);
+            
+            result = await handleScheduling(personName || "Cliente", dateTimeParam);
         } else {
             result = { success: true, message: "Webhook contatado, mas a intenção não é de agendamento." };
         }
+        
+        const currentSession = request.body.session;
+        const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
+        const responsePayload = createResponse(result.message, context);
+        
+        console.log("📤 Resposta enviada:", result.message);
+        console.log("=== FIM REQUEST ===\n");
+        
+        return response.json(responsePayload);
+
+    } catch (error) {
+        console.error("❌ Erro CRÍTICO no webhook:", error);
+        const responsePayload = createResponse("Houve um erro interno. Por favor, tente novamente.");
+        return response.json(responsePayload);
+    }
+});
         
         const currentSession = request.body.session;
         const context = result.success ? null : `${currentSession}/contexts/aguardando_agendamento`;
@@ -70,14 +87,15 @@ async function handleScheduling(name, dateTimeParam) {
     
     let requestedDate;
     
-    // Para @sys.date-time do Dialogflow, a estrutura pode variar
+    // Para @sys.date-time do Dialogflow, a estrutura é: { "date_time": "2025-08-22T09:00:00-03:00" }
     if (typeof dateTimeParam === 'string') {
         // Se for uma string ISO direta
         requestedDate = new Date(dateTimeParam);
     } else if (dateTimeParam && typeof dateTimeParam === 'object') {
-        // Se for um objeto, procura pelas propriedades comuns do @sys.date-time
+        // O formato específico do seu Dialogflow
         if (dateTimeParam.date_time) {
             requestedDate = new Date(dateTimeParam.date_time);
+            console.log("✅ Usando dateTimeParam.date_time:", dateTimeParam.date_time);
         } else if (dateTimeParam.startDateTime) {
             requestedDate = new Date(dateTimeParam.startDateTime);
         } else if (dateTimeParam.start) {
@@ -93,20 +111,6 @@ async function handleScheduling(name, dateTimeParam) {
         }
     }
 
-    // Se ainda não conseguiu extrair a data, tenta outras abordagens
-    if (!requestedDate || isNaN(requestedDate.getTime())) {
-        console.log("❌ Tentando abordagem alternativa para extrair data...");
-        
-        // Se o parâmetro tem uma propriedade que parece ser uma data ISO
-        const dateStr = JSON.stringify(dateTimeParam);
-        const isoDateMatch = dateStr.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
-        
-        if (isoDateMatch) {
-            requestedDate = new Date(isoDateMatch[1]);
-            console.log("✅ Data extraída via regex:", isoDateMatch[1]);
-        }
-    }
-
     if (!requestedDate || isNaN(requestedDate.getTime())) {
         console.log("❌ Não foi possível extrair data válida do parâmetro");
         return { 
@@ -116,6 +120,7 @@ async function handleScheduling(name, dateTimeParam) {
     }
 
     console.log("✅ Data processada com sucesso:", requestedDate.toISOString());
+    console.log("✅ Data local:", requestedDate.toString());
 
     const now = new Date();
     if (requestedDate <= now) {
@@ -316,18 +321,24 @@ function getPersonName(contexts) {
     }
     
     for (const context of contexts) {
-        if (context.name && context.name.includes('person-context')) {
-            if (context.parameters && context.parameters.name) {
-                return context.parameters.name;
-            }
-        }
-        
-        // Fallback: procura em qualquer contexto por um parâmetro de nome
         if (context.parameters) {
-            const nameFields = ['name', 'nome', 'person-name', 'given-name'];
+            // Procura por person.name (formato do seu Dialogflow)
+            if (context.parameters.person && context.parameters.person.name) {
+                return context.parameters.person.name;
+            }
+            
+            // Fallback: procura em qualquer contexto por um parâmetro de nome
+            const nameFields = ['name', 'nome', 'person-name', 'given-name', 'person'];
             for (const field of nameFields) {
                 if (context.parameters[field]) {
-                    return context.parameters[field];
+                    // Se for um objeto, procura pela propriedade name
+                    if (typeof context.parameters[field] === 'object' && context.parameters[field].name) {
+                        return context.parameters[field].name;
+                    }
+                    // Se for string diretamente
+                    if (typeof context.parameters[field] === 'string') {
+                        return context.parameters[field];
+                    }
                 }
             }
         }
