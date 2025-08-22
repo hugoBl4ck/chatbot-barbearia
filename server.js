@@ -28,11 +28,17 @@ const CONFIG = {
 // =================================================================
 // INICIALIZAÇÃO DO FIREBASE E SERVIDOR
 // =================================================================
-admin.initializeApp({
-  credential: admin.credential.cert(CONFIG.firebaseCreds)
-});
-const db = admin.firestore();
-console.log('✅ Conectado ao Firebase/Firestore.');
+// A inicialização só ocorre se as credenciais existirem
+if (CONFIG.firebaseCreds && Object.keys(CONFIG.firebaseCreds).length > 0) {
+    admin.initializeApp({
+      credential: admin.credential.cert(CONFIG.firebaseCreds)
+    });
+    const db = admin.firestore();
+    console.log('✅ Conectado ao Firebase/Firestore.');
+} else {
+    console.warn('⚠️  Credenciais do Firebase não encontradas. O webhook funcionará sem conexão com o banco de dados.');
+}
+
 
 validateEnvironment();
 const PORT = process.env.PORT || 3000;
@@ -40,7 +46,7 @@ app.listen(PORT, () => console.log(`🚀 Webhook da barbearia rodando na porta $
 
 
 // =================================================================
-// ROTA PRINCIPAL DO WEBHOOK (LÓGICA IGUAL, IMPLEMENTAÇÃO DIFERENTE)
+// ROTA PRINCIPAL DO WEBHOOK
 // =================================================================
 app.post("/webhook", async (request, response) => {
     const startTime = Date.now();
@@ -48,8 +54,12 @@ app.post("/webhook", async (request, response) => {
         console.log("\n🔄 === NOVO REQUEST WEBHOOK ===");
         validateRequest(request.body);
 
+        // Adicionado para depuração fácil
+        console.log("DADOS COMPLETOS RECEBIDOS:", JSON.stringify(request.body, null, 2));
+
         const { intent, parameters, queryText, session, outputContexts } = request.body.queryResult;
         const intentName = intent.displayName;
+        const db = admin.firestore(); // Garante que temos a instância do DB
         
         console.log(`🎯 Intent: ${intentName} | 💬 Texto: "${queryText}"`);
 
@@ -60,11 +70,11 @@ app.post("/webhook", async (request, response) => {
             if (!dateTimeParam) return response.json(createResponse("Não entendi a data. Por favor, diga o dia e a hora."));
             
             const personInfo = getPersonInfo(outputContexts);
-            resultPayload = await handleScheduling(personInfo, dateTimeParam);
+            resultPayload = await handleScheduling(personInfo, dateTimeParam, db);
 
         } else if (intentName === "CancelarAgendamento") {
             const personInfo = getPersonInfo(outputContexts);
-            resultPayload = await handleCancellation(personInfo);
+            resultPayload = await handleCancellation(personInfo, db);
 
         } else {
             resultPayload = { success: true, message: "Webhook contatado, mas sem ação definida." };
@@ -100,28 +110,25 @@ app.post("/webhook", async (request, response) => {
 // LÓGICA DE NEGÓCIOS (ADAPTADA PARA FIRESTORE)
 // =================================================================
 
-async function handleScheduling(personInfo, dateTimeParam) {
-    // Validações iniciais (sem alteração)
+async function handleScheduling(personInfo, dateTimeParam, db) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Não consegui identificar seu nome e telefone. Poderia informá-los novamente?" };
     const requestedDate = extractDateFromDialogflow(dateTimeParam);
     if (!requestedDate) return { success: false, message: "Não consegui entender a data e hora. Tente um formato como 'amanhã às 14h'." };
     if (requestedDate <= new Date()) return { success: false, message: "Não é possível agendar no passado. Por favor, escolha uma data e hora futura." };
 
-    // Verificações no banco de dados (agora muito mais rápidas)
-    const businessHoursCheck = await checkBusinessHours(requestedDate);
+    const businessHoursCheck = await checkBusinessHours(requestedDate, db);
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
 
-    const hasConflict = await checkConflicts(requestedDate);
+    const hasConflict = await checkConflicts(requestedDate, db);
     if (hasConflict) return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
 
-    // Salvar no banco
-    await saveAppointment(personInfo, requestedDate);
+    await saveAppointment(personInfo, requestedDate, db);
     
     const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: CONFIG.timezone }).format(requestedDate);
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento foi confirmado para ${formattedDateForUser}. Te vejo em breve!` };
 }
 
-async function handleCancellation(personInfo) {
+async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone. Você pode me informar?" };
 
     const schedulesRef = db.collection(CONFIG.collections.schedules);
@@ -151,8 +158,7 @@ async function handleCancellation(personInfo) {
 // FUNÇÕES UTILITÁRIAS (ADAPTADAS PARA FIRESTORE)
 // =================================================================
 
-async function checkBusinessHours(date) {
-    // ... (lógica de extração do dia da semana e hora é a mesma) ...
+async function checkBusinessHours(date, db) {
     const formatter = new Intl.DateTimeFormat('en-US', { timeZone: CONFIG.timezone, weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false });
     const parts = formatter.formatToParts(date);
     const getValue = type => parts.find(p => p.type === type)?.value;
@@ -161,7 +167,6 @@ async function checkBusinessHours(date) {
     const requestedTime = parseInt(getValue('hour')) + parseInt(getValue('minute')) / 60;
     const dayName = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: CONFIG.timezone }).format(date);
     
-    // Consulta ao Firestore
     const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const doc = await docRef.get();
 
@@ -182,12 +187,10 @@ async function checkBusinessHours(date) {
     }
 }
 
-async function checkConflicts(requestedDate) {
+async function checkConflicts(requestedDate, db) {
     const serviceDurationMs = CONFIG.serviceDurationMinutes * 60 * 1000;
     const requestedStart = requestedDate.getTime();
     
-    // Para simplificar e manter a performance, consultamos um intervalo de tempo
-    // um pouco maior e fazemos a verificação de sobreposição exata no código.
     const searchStart = new Date(requestedStart - serviceDurationMs);
     const searchEnd = new Date(requestedStart + serviceDurationMs);
 
@@ -200,7 +203,7 @@ async function checkConflicts(requestedDate) {
 
     if (snapshot.empty) {
         console.log("✅ Nenhum conflito em potencial encontrado. Horário disponível.");
-        return false; // Nenhum conflito
+        return false;
     }
 
     const requestedEnd = requestedStart + serviceDurationMs;
@@ -209,15 +212,15 @@ async function checkConflicts(requestedDate) {
         const existingEnd = existingStart + serviceDurationMs;
         if ((requestedStart < existingEnd) && (requestedEnd > existingStart)) {
             console.log(`💥 CONFLITO ENCONTRADO com agendamento das ${doc.data().DataHoraISO}`);
-            return true; // Conflito encontrado
+            return true;
         }
     }
     
     console.log("✅ Nenhum conflito real encontrado após verificação. Horário disponível.");
-    return false; // Nenhum conflito
+    return false;
 }
 
-async function saveAppointment(personInfo, requestedDate) {
+async function saveAppointment(personInfo, requestedDate, db) {
     const newAppointment = {
         NomeCliente: personInfo.name,
         TelefoneCliente: personInfo.phone,
@@ -232,13 +235,6 @@ async function saveAppointment(personInfo, requestedDate) {
 }
 
 // Funções que não mudam
-function getPersonInfo(contexts) { /* ...código idêntico ao anterior... */ }
-function extractDateFromDialogflow(param) { /* ...código idêntico ao anterior... */ }
-function createResponse(text) { return { fulfillmentMessages: [{ text: { text: [text] } }] }; }
-function validateRequest(body) { if (!body?.queryResult?.intent?.displayName) { throw new Error("Requisição do Dialogflow inválida."); } }
-function validateEnvironment() { if (!process.env.FIREBASE_CREDENTIALS) { console.error('❌ Variável de ambiente FIREBASE_CREDENTIALS faltando.'); process.exit(1); } try { JSON.parse(process.env.FIREBASE_CREDENTIALS); } catch (e) { console.error('❌ FIREBASE_CREDENTIALS não é um JSON válido.'); process.exit(1); } console.log('✅ Variável de ambiente FIREBASE_CREDENTIALS configurada.'); }
-
-// Cole o código das funções que não mudaram aqui para garantir que o arquivo esteja completo
 function getPersonInfo(contexts) {
     const info = { name: null, phone: null };
     if (!contexts) return info;
@@ -259,3 +255,6 @@ function extractDateFromDialogflow(param) {
     if (dateString) { const date = new Date(dateString); return isNaN(date.getTime()) ? null : date; }
     return null;
 }
+function createResponse(text) { return { fulfillmentMessages: [{ text: { text: [text] } }] }; }
+function validateRequest(body) { if (!body?.queryResult?.intent?.displayName) { throw new Error("Requisição do Dialogflow inválida."); } }
+function validateEnvironment() { if (!process.env.FIREBASE_CREDENTIALS) { console.error('❌ Variável de ambiente FIREBASE_CREDENTIALS faltando.'); } try { JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'); } catch (e) { console.error('❌ FIREBASE_CREDENTIALS não é um JSON válido.'); } }
