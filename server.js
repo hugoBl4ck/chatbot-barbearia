@@ -250,31 +250,45 @@ function validateRequest(request) {
 
 async function checkConflicts(requestedDate, scheduleSheet) {
     try {
+        console.log("🔍 Verificando conflitos de horário...");
         const rows = await scheduleSheet.getRows();
         const serviceDurationMs = SERVICE_DURATION_MINUTES * 60 * 1000;
         const requestedStart = requestedDate.getTime();
         const requestedEnd = requestedStart + serviceDurationMs;
 
+        console.log(`- Horário solicitado: de ${new Date(requestedStart).toISOString()} a ${new Date(requestedEnd).toISOString()}`);
+
         for (const row of rows) {
-            if (!row.DataHora) continue;
-            
-            const existingDate = new Date(row.DataHora);
-            if (isNaN(existingDate.getTime())) continue;
-            
+            // *** A CORREÇÃO PRINCIPAL ESTÁ AQUI ***
+            // Usar a coluna correta 'DataHoraISO' para ler os agendamentos existentes
+            if (!row.DataHoraISO) {
+                continue; // Pula linhas que não têm um agendamento válido
+            }
+
+            const existingDate = new Date(row.DataHoraISO); // Usa a coluna correta
+            if (isNaN(existingDate.getTime())) {
+                continue; // Pula datas inválidas na planilha
+            }
+
             const existingStart = existingDate.getTime();
             const existingEnd = existingStart + serviceDurationMs;
 
-            // Verifica se há sobreposição de horários
+            // Sua lógica de sobreposição (que já estava correta)
+            // Verifica se o novo agendamento (requested) sobrepõe o existente (existing)
             const hasOverlap = (requestedStart < existingEnd) && (requestedEnd > existingStart);
+            
             if (hasOverlap) {
-                return true;
+                console.log(`💥 CONFLITO ENCONTRADO com agendamento das ${existingDate.toISOString()}`);
+                return true; // Conflito encontrado, horário indisponível
             }
         }
-        
-        return false;
+
+        console.log("✅ Nenhum conflito encontrado. Horário disponível.");
+        return false; // Nenhum conflito, horário disponível
+
     } catch (error) {
         console.error("Erro ao verificar conflitos:", error);
-        return true; // Em caso de erro, assume conflito por segurança
+        return true; // Em caso de erro, assume conflito por segurança para não agendar errado
     }
 }
 
