@@ -44,7 +44,13 @@ validateEnvironment();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Webhook da barbearia rodando na porta ${PORT}`));
 
-
+// =================================================================
+// ROTA "HEALTH CHECK" PARA MANTER O SERVIÇO ATIVO (UPTIMEROBOT)
+// =================================================================
+app.get("/webhook", (request, response) => {
+    console.log("PING recebido do UptimeRobot!");
+    return response.status(200).send("Estou acordado!");
+});
 // =================================================================
 // ROTA PRINCIPAL DO WEBHOOK
 // =================================================================
