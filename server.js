@@ -17,12 +17,35 @@ validateEnvironment();
 // --- FUNÇÃO PRINCIPAL DO WEBHOOK ---
 app.post("/webhook", async (request, response) => {
     try {
+        console.log("🔄 Request completo recebido:");
+        console.log("Headers:", request.headers);
+        console.log("Body:", JSON.stringify(request.body, null, 2));
+        
         validateRequest(request);
         const intent = request.body.queryResult.intent.displayName;
+        const allParams = request.body.queryResult.parameters;
+        
+        console.log("🎯 Intent detectada:", intent);
+        console.log("📋 Todos os parâmetros:", JSON.stringify(allParams, null, 2));
+        
         let result;
 
         if (intent === "AgendarHorario") {
-            const dateTimeParam = request.body.queryResult.parameters['date-time'];
+            // Procura o parâmetro de data com diferentes nomes possíveis
+            const dateTimeParam = allParams['date-time'] || 
+                                 allParams['datetime'] || 
+                                 allParams['data-hora'] || 
+                                 allParams['time'] ||
+                                 allParams['horario'];
+            
+            console.log("🕐 Parâmetro de data/hora encontrado:", JSON.stringify(dateTimeParam, null, 2));
+            
+            if (!dateTimeParam) {
+                console.log("❌ Nenhum parâmetro de data encontrado!");
+                console.log("Parâmetros disponíveis:", Object.keys(allParams));
+                return response.json(createResponse("Por favor, me informe quando você gostaria de agendar. Exemplo: 'sexta-feira às 9 da manhã' ou 'amanhã às 14 horas'."));
+            }
+            
             const personName = getPersonName(request.body.queryResult.outputContexts) || "Cliente";
             result = await handleScheduling(personName, dateTimeParam);
         } else {
@@ -43,17 +66,61 @@ app.post("/webhook", async (request, response) => {
 
 // --- LÓGICA PRINCIPAL DE AGENDAMENTO ---
 async function handleScheduling(name, dateTimeParam) {
-    if (!dateTimeParam || !dateTimeParam.start) {
-        return { success: false, message: "Por favor, informe uma data e hora completas." };
+    console.log("📅 Parâmetro date-time recebido:", JSON.stringify(dateTimeParam, null, 2));
+    
+    let requestedDate;
+    
+    // Para @sys.date-time do Dialogflow, a estrutura pode variar
+    if (typeof dateTimeParam === 'string') {
+        // Se for uma string ISO direta
+        requestedDate = new Date(dateTimeParam);
+    } else if (dateTimeParam && typeof dateTimeParam === 'object') {
+        // Se for um objeto, procura pelas propriedades comuns do @sys.date-time
+        if (dateTimeParam.date_time) {
+            requestedDate = new Date(dateTimeParam.date_time);
+        } else if (dateTimeParam.startDateTime) {
+            requestedDate = new Date(dateTimeParam.startDateTime);
+        } else if (dateTimeParam.start) {
+            requestedDate = new Date(dateTimeParam.start);
+        } else if (dateTimeParam.endDateTime) {
+            requestedDate = new Date(dateTimeParam.endDateTime);
+        } else {
+            // Tenta converter o objeto inteiro para string e depois para data
+            const dateStr = Object.values(dateTimeParam)[0];
+            if (dateStr) {
+                requestedDate = new Date(dateStr);
+            }
+        }
     }
 
-    const requestedDate = new Date(dateTimeParam.start);
-
-    if (isNaN(requestedDate.getTime())) {
-        return { success: false, message: `Não consegui entender a data. Tente um formato como 'amanhã às 14:00'.` };
+    // Se ainda não conseguiu extrair a data, tenta outras abordagens
+    if (!requestedDate || isNaN(requestedDate.getTime())) {
+        console.log("❌ Tentando abordagem alternativa para extrair data...");
+        
+        // Se o parâmetro tem uma propriedade que parece ser uma data ISO
+        const dateStr = JSON.stringify(dateTimeParam);
+        const isoDateMatch = dateStr.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+        
+        if (isoDateMatch) {
+            requestedDate = new Date(isoDateMatch[1]);
+            console.log("✅ Data extraída via regex:", isoDateMatch[1]);
+        }
     }
-    if (requestedDate < new Date()) {
-        return { success: false, message: "Não é possível agendar para um horário que já passou." };
+
+    if (!requestedDate || isNaN(requestedDate.getTime())) {
+        console.log("❌ Não foi possível extrair data válida do parâmetro");
+        return { 
+            success: false, 
+            message: "Não consegui entender a data e hora. Por favor, tente com um formato mais específico como 'sexta-feira às 9 da manhã' ou 'amanhã às 14 horas'." 
+        };
+    }
+
+    console.log("✅ Data processada com sucesso:", requestedDate.toISOString());
+
+    const now = new Date();
+    if (requestedDate <= now) {
+        console.log("❌ Data no passado:", requestedDate, "vs agora:", now);
+        return { success: false, message: "Não é possível agendar para um horário que já passou. Por favor, escolha uma data e hora futura." };
     }
     
     try {
@@ -294,8 +361,39 @@ function createResponse(text, context = null) {
     return response;
 }
 
-// Health check endpoint
-app.get('/health', (req, res) => {
+// Endpoint para debug mais detalhado - ver EXATAMENTE o que chega
+app.post("/debug-detailed", (req, res) => {
+    console.log("\n=== DEBUG DETALHADO ===");
+    console.log("🔍 Request Headers:", JSON.stringify(req.headers, null, 2));
+    console.log("🔍 Request Body:", JSON.stringify(req.body, null, 2));
+    
+    if (req.body.queryResult) {
+        console.log("🔍 Query Result:", JSON.stringify(req.body.queryResult, null, 2));
+        console.log("🔍 Parameters:", JSON.stringify(req.body.queryResult.parameters, null, 2));
+        console.log("🔍 Query Text:", req.body.queryResult.queryText);
+        console.log("🔍 Intent:", req.body.queryResult.intent?.displayName);
+        
+        // Verifica especificamente o parâmetro date-time
+        const dateTimeParam = req.body.queryResult.parameters?.['date-time'];
+        if (dateTimeParam) {
+            console.log("🔍 ENCONTROU date-time:", JSON.stringify(dateTimeParam, null, 2));
+            console.log("🔍 Tipo do date-time:", typeof dateTimeParam);
+        } else {
+            console.log("❌ NÃO ENCONTROU parâmetro date-time");
+            console.log("📋 Parâmetros disponíveis:", Object.keys(req.body.queryResult.parameters || {}));
+        }
+    }
+    
+    console.log("=== FIM DEBUG ===\n");
+    
+    res.json({
+        message: "Debug completo no console",
+        hasDateTime: !!req.body.queryResult?.parameters?.['date-time'],
+        allParameters: req.body.queryResult?.parameters || {},
+        queryText: req.body.queryResult?.queryText,
+        intent: req.body.queryResult?.intent?.displayName
+    });
+});
     res.json({ 
         status: 'OK', 
         timestamp: new Date().toISOString(),
