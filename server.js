@@ -394,6 +394,9 @@ app.post("/debug-detailed", (req, res) => {
         intent: req.body.queryResult?.intent?.displayName
     });
 });
+
+// Health check endpoint
+app.get('/health', (req, res) => {
     res.json({ 
         status: 'OK', 
         timestamp: new Date().toISOString(),
@@ -426,4 +429,5 @@ app.listen(PORT, () => {
     console.log(`🚀 Webhook da barbearia rodando na porta ${PORT}`);
     console.log(`📋 Health check disponível em: http://localhost:${PORT}/health`);
     console.log(`🧪 Teste de planilhas em: http://localhost:${PORT}/test-sheets`);
+    console.log(`🐛 Debug detalhado em: http://localhost:${PORT}/debug-detailed`);
 });
