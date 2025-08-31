@@ -74,7 +74,7 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     const servicoRef = db.collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
 
-    if (!servicoSnap.exists()) {
+    if (!servicoSnap.exists) {
         return { success: false, message: "O serviço selecionado não foi encontrado." };
     }
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
