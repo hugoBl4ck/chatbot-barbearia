@@ -82,7 +82,7 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
 }
 
 // =================================================================
-// FUNÇÃO checkBusinessHours CORRIGIDA
+// FUNÇÃO checkBusinessHours
 // =================================================================
 async function checkBusinessHours(date, duracaoMinutos, db) {
     const dayOfWeek = date.getDay();
@@ -95,7 +95,7 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
     
     const dayConfig = docSnap.data();
     const timeToMinutes = (str) => {
-        if (!str) return 0;
+        if (!str) return null; // Retorna null se o horário não estiver definido
         const [h, m] = str.split(':').map(Number);
         return (h * 60) + (m || 0);
     };
@@ -103,27 +103,42 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
     const requestedStartMinutes = date.getHours() * 60 + date.getMinutes();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
 
+    // Períodos de trabalho em minutos do dia
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
 
-    const isWithinMorning = requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd;
-    const isWithinAfternoon = afternoonStart > 0 && requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd;
+    // Lista de todos os períodos ABERTOS
+    const openSlots = [];
+    if (morningStart !== null && morningEnd !== null) {
+        openSlots.push({ start: morningStart, end: morningEnd });
+    }
+    if (afternoonStart !== null && afternoonEnd !== null) {
+        openSlots.push({ start: afternoonStart, end: afternoonEnd });
+    }
+    
+    if (openSlots.length === 0) {
+        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    }
 
-    if (isWithinMorning || isWithinAfternoon) {
+    // Verifica se o agendamento cabe em ALGUM dos períodos abertos
+    let fitsInSchedule = false;
+    for (const slot of openSlots) {
+        if (requestedStartMinutes >= slot.start && requestedEndMinutes <= slot.end) {
+            fitsInSchedule = true;
+            break; // Encontrou um período válido, pode parar de verificar
+        }
+    }
+
+    if (fitsInSchedule) {
         return { isOpen: true };
     } else {
-        const morning = `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}`;
+        const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
         const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
         return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
 }
-
-// O restante das funções já estava correto.
-async function handleCancellation(personInfo, db) { /* ...código anterior... */ }
-async function checkConflicts(requestedDate, duracaoMinutos, db) { /* ...código anterior... */ }
-async function saveAppointment(personInfo, requestedDate, servico, db) { /* ...código anterior... */ }
 
 // Cole o restante das funções aqui para garantir a integridade do arquivo
 async function handleCancellation(personInfo, db) {
