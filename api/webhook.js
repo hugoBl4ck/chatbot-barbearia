@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO LANDBOT COM STATUS)
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO LANDBOT COM SINTAXE CORRIGIDA)
 // =================================================================
 
 const express = require("express");
@@ -49,7 +49,6 @@ app.post("/api/webhook", async (request, response) => {
             resultPayload = { success: false, message: "Desculpe, não entendi sua intenção." };
         }
         
-        // Formato final da resposta para o Landbot
         const responseData = {
             status: resultPayload.success ? 'success' : 'error',
             message: resultPayload.message
@@ -65,7 +64,7 @@ app.post("/api/webhook", async (request, response) => {
 });
 
 // =================================================================
-// LÓGICA DE NEGÓCIOS E FUNÇÕES AUXILIARES (COM RETORNO PADRONIZADO)
+// LÓGICA DE NEGÓCIOS (COM SINTAXE DO FIREBASE-ADMIN CORRIGIDA)
 // =================================================================
     
 async function handleScheduling(personInfo, requestedDate, servicoId, db) {
@@ -73,10 +72,11 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço para agendar." };
     if (requestedDate <= new Date()) return { success: false, message: "Não é possível agendar no passado. Por favor, escolha uma data e hora futura." };
 
+    // SINTAXE CORRIGIDA
     const servicoRef = db.collection(CONFIG.collections.services).doc(servicoId);
-    const servicoSnap = await getDoc(servicoRef);
+    const servicoSnap = await servicoRef.get(); // Usa .get()
 
-    if (!servicoSnap.exists()) {
+    if (!servicoSnap.exists) {
         return { success: false, message: "O serviço selecionado não foi encontrado." };
     }
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
@@ -98,34 +98,35 @@ async function handleCancellation(personInfo, db) {
         return { success: false, message: "Para cancelar, preciso do seu telefone. Você pode me informar?" };
     }
 
-    const schedulesRef = collection(db, CONFIG.collections.schedules);
-    const q = query(schedulesRef, 
-        where('TelefoneCliente', '==', personInfo.phone),
-        where('Status', '==', 'Agendado'),
-        where('DataHoraISO', '>', new Date().toISOString())
-    );
-    const snapshot = await getDocs(q);
+    // SINTAXE CORRIGIDA
+    const schedulesRef = db.collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('TelefoneCliente', '==', personInfo.phone)
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>', new Date().toISOString());
+        
+    const snapshot = await q.get(); // Usa .get()
 
     if (snapshot.empty) {
         return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone para cancelar.` };
     }
     
-    // Cancela todos os agendamentos futuros do cliente
     let count = 0;
     for (const doc of snapshot.docs) {
-        await updateDoc(doc.ref, { Status: 'Cancelado' });
+        await doc.ref.update({ Status: 'Cancelado' }); // Usa doc.ref.update()
         count++;
     }
     
     return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei para o seu telefone.` };
 }
 
-// ... (O resto das funções auxiliares, como checkBusinessHours, checkConflicts, saveAppointment, não precisam mudar) ...
 async function checkBusinessHours(date, duracaoMinutos, db) {
     const dayOfWeek = date.getDay();
+    // SINTAXE CORRIGIDA
     const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
-    const docSnap = await getDoc(docRef);
-    if (!docSnap.exists()) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    const docSnap = await docRef.get();
+    // ... (resto da lógica é matemática e não muda) ...
+    if (!docSnap.exists) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
     const dayConfig = docSnap.data();
     const timeToDecimal = (str) => { if (!str) return 0; const [h, m] = str.split(':').map(Number); return h + (m || 0) / 60; };
     const requestedTime = date.getHours() + date.getMinutes() / 60;
@@ -140,19 +141,23 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
         return { isOpen: false, message: "O horário solicitado, considerando a duração do serviço, está fora do nosso expediente." };
     }
 }
+
 async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const serviceDurationMs = duracaoMinutos * 60 * 1000;
     const requestedStart = requestedDate.getTime();
     const requestedEnd = requestedStart + serviceDurationMs;
     const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
     const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
-    const schedulesRef = collection(db, CONFIG.collections.schedules);
-    const q = query(schedulesRef, 
-        where('Status', '==', 'Agendado'),
-        where('DataHoraISO', '>=', searchStart.toISOString()),
-        where('DataHoraISO', '<=', searchEnd.toISOString())
-    );
-    const snapshot = await getDocs(q);
+    
+    // SINTAXE CORRIGIDA
+    const schedulesRef = db.collection(CONFIG.collections.schedules);
+    const q = schedulesRef 
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', searchStart.toISOString())
+        .where('DataHoraISO', '<=', searchEnd.toISOString());
+        
+    const snapshot = await q.get();
+
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
         const existingStart = new Date(existingData.DataHoraISO).getTime();
@@ -163,6 +168,7 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     }
     return false;
 }
+
 async function saveAppointment(personInfo, requestedDate, servico, db) {
     const newAppointment = {
         NomeCliente: personInfo.name,
@@ -175,8 +181,8 @@ async function saveAppointment(personInfo, requestedDate, servico, db) {
         servicoNome: servico.nome,
         duracaoMinutos: servico.duracaoMinutos,
     };
-    await addDoc(collection(db, CONFIG.collections.schedules), newAppointment);
+    // SINTAXE CORRIGIDA
+    await db.collection(CONFIG.collections.schedules).add(newAppointment);
 }
-
 
 module.exports = app;
