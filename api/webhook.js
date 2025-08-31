@@ -89,7 +89,7 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     if (requestedDate <= new Date()) return { message: "Não é possível agendar no passado. Por favor, escolha uma data e hora futura." };
 
     // Busca os detalhes do serviço selecionado no Firestore
-    const servicoRef = doc(db, CONFIG.collections.services, servicoId);
+    const servicoRef = db.collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await getDoc(servicoRef);
 
     if (!servicoSnap.exists()) {
