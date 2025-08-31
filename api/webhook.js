@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO LANDBOT COM CORREÇÃO FINAL)
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO COM LÓGICA DE HORÁRIO CORRIGIDA)
 // =================================================================
 
 const express = require("express");
@@ -41,7 +41,7 @@ app.post("/api/webhook", async (request, response) => {
                 resultPayload = await handleScheduling(personInfo, parsedDate, servicoId, db);
             }
         } else if (intent === 'cancelarHorario') {
-             const personInfo = { name: nome, phone: telefone };
+             const personInfo = { phone: telefone };
              resultPayload = await handleCancellation(personInfo, db);
         } else {
             resultPayload = { success: false, message: "Desculpe, não entendi sua intenção." };
@@ -65,9 +65,8 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     const servicoRef = db.collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
 
-    if (!servicoSnap.exists) { 
-        return { success: false, message: "O serviço selecionado não foi encontrado." };
-    }
+    if (!servicoSnap.exists) return { success: false, message: "O serviço selecionado não foi encontrado." };
+    
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
 
     const businessHoursCheck = await checkBusinessHours(requestedDate, servico.duracaoMinutos, db);
@@ -82,6 +81,51 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
+// =================================================================
+// FUNÇÃO checkBusinessHours CORRIGIDA
+// =================================================================
+async function checkBusinessHours(date, duracaoMinutos, db) {
+    const dayOfWeek = date.getDay();
+    const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
+    const docSnap = await docRef.get();
+    
+    if (!docSnap.exists) {
+        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    }
+    
+    const dayConfig = docSnap.data();
+    const timeToMinutes = (str) => {
+        if (!str) return 0;
+        const [h, m] = str.split(':').map(Number);
+        return (h * 60) + (m || 0);
+    };
+
+    const requestedStartMinutes = date.getHours() * 60 + date.getMinutes();
+    const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
+
+    const morningStart = timeToMinutes(dayConfig.InicioManha);
+    const morningEnd = timeToMinutes(dayConfig.FimManha);
+    const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
+    const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
+
+    const isWithinMorning = requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd;
+    const isWithinAfternoon = afternoonStart > 0 && requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd;
+
+    if (isWithinMorning || isWithinAfternoon) {
+        return { isOpen: true };
+    } else {
+        const morning = `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}`;
+        const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
+        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
+    }
+}
+
+// O restante das funções já estava correto.
+async function handleCancellation(personInfo, db) { /* ...código anterior... */ }
+async function checkConflicts(requestedDate, duracaoMinutos, db) { /* ...código anterior... */ }
+async function saveAppointment(personInfo, requestedDate, servico, db) { /* ...código anterior... */ }
+
+// Cole o restante das funções aqui para garantir a integridade do arquivo
 async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
@@ -92,27 +136,6 @@ async function handleCancellation(personInfo, db) {
     for (const doc of snapshot.docs) { await doc.ref.update({ Status: 'Cancelado' }); count++; }
     return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.` };
 }
-
-async function checkBusinessHours(date, duracaoMinutos, db) {
-    const dayOfWeek = date.getDay();
-    const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
-    const docSnap = await docRef.get();
-    
-    // =========================================================
-    // CORREÇÃO APLICADA AQUI
-    // =========================================================
-    if (!docSnap.exists) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
-    
-    const dayConfig = docSnap.data();
-    const timeToDecimal = (str) => { if (!str) return 0; const [h, m] = str.split(':').map(Number); return h + (m || 0) / 60; };
-    const requestedTime = date.getHours() + date.getMinutes() / 60;
-    const serviceDurationInHours = duracaoMinutos / 60;
-    const isWithinHours = (time, start, end) => { if (!start || !end) return false; return time >= timeToDecimal(start) && (time + serviceDurationInHours) <= timeToDecimal(end); };
-    if (isWithinHours(requestedTime, dayConfig.InicioManha, dayConfig.FimManha) || isWithinHours(requestedTime, dayConfig.InicioTarde, dayConfig.FimTarde)) {
-        return { isOpen: true };
-    } else { return { isOpen: false, message: "O horário solicitado, considerando a duração do serviço, está fora do nosso expediente." }; }
-}
-
 async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const serviceDurationMs = duracaoMinutos * 60 * 1000;
     const requestedStart = requestedDate.getTime();
@@ -130,7 +153,6 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     }
     return false;
 }
-
 async function saveAppointment(personInfo, requestedDate, servico, db) {
     const newAppointment = {
         NomeCliente: personInfo.name, TelefoneCliente: personInfo.phone, DataHoraISO: requestedDate.toISOString(),
