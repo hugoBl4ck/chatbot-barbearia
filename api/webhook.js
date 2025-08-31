@@ -148,22 +148,39 @@ async function handleCancellation(personInfo, db) {
 }
 
 async function checkConflicts(requestedDate, duracaoMinutos, db) {
-    const serviceDurationMs = duracaoMinutos * 60 * 1000;
+    console.log("--- INICIANDO VERIFICAÇÃO DE CONFLITOS ---");
+
     const requestedStart = requestedDate.getTime();
-    const requestedEnd = requestedStart + serviceDurationMs;
-    const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
-    const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
+    const requestedEnd = requestedStart + duracaoMinutos * 60 * 1000;
+
+    // Buscar apenas horários próximos (para não carregar tudo do banco)
+    const searchStart = new Date(requestedStart - 3 * 60 * 60 * 1000); // 3h antes
+    const searchEnd = new Date(requestedStart + 3 * 60 * 60 * 1000);   // 3h depois
+
     const schedulesRef = db.collection(CONFIG.collections.schedules);
-    const q = schedulesRef.where('Status', '==', 'Agendado').where('DataHoraISO', '>=', searchStart.toISOString()).where('DataHoraISO', '<=', searchEnd.toISOString());
+    const q = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', searchStart.toISOString())
+        .where('DataHoraISO', '<=', searchEnd.toISOString());
+
     const snapshot = await q.get();
+
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
         const existingStart = new Date(existingData.DataHoraISO).getTime();
         const existingEnd = existingStart + ((existingData.duracaoMinutos || 60) * 60 * 1000);
-        if (requestedStart < existingEnd && requestedEnd > existingStart) { return true; }
+
+        // Se o novo horário começar antes do final de outro e terminar depois do início, há conflito
+        if (requestedStart < existingEnd && requestedEnd > existingStart) {
+            console.log(`⛔ CONFLITO: ${existingData.servicoNome} em ${existingData.DataHoraISO}`);
+            return true;
+        }
     }
+
+    console.log("✅ SEM CONFLITO.");
     return false;
 }
+
 
 async function saveAppointment(personInfo, requestedDate, servico, db) {
     const newAppointment = {
