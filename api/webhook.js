@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO LANDBOT COM SINTAXE CORRIGIDA)
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO LANDBOT COM DEBUG)
 // =================================================================
 
 const express = require("express");
@@ -23,7 +23,6 @@ if (!admin.apps.length) {
     admin.initializeApp({ credential: admin.credential.cert(CONFIG.firebaseCreds) });
 }
 
-// --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
     console.log("\n🔄 === NOVO REQUEST WEBHOOK (LANDBOT) ===", JSON.stringify(body, null, 2));
@@ -64,7 +63,7 @@ app.post("/api/webhook", async (request, response) => {
 });
 
 // =================================================================
-// LÓGICA DE NEGÓCIOS (COM SINTAXE DO FIREBASE-ADMIN CORRIGIDA)
+// LÓGICA DE NEGÓCIOS E FUNÇÕES AUXILIARES
 // =================================================================
     
 async function handleScheduling(personInfo, requestedDate, servicoId, db) {
@@ -72,11 +71,10 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço para agendar." };
     if (requestedDate <= new Date()) return { success: false, message: "Não é possível agendar no passado. Por favor, escolha uma data e hora futura." };
 
-    // SINTAXE CORRIGIDA
     const servicoRef = db.collection(CONFIG.collections.services).doc(servicoId);
-    const servicoSnap = await servicoRef.get(); // Usa .get()
+    const servicoSnap = await servicoRef.get();
 
-    if (!servicoSnap.exists) {
+    if (!servicoSnap.exists()) {
         return { success: false, message: "O serviço selecionado não foi encontrado." };
     }
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
@@ -94,47 +92,55 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
 }
 
 async function handleCancellation(personInfo, db) {
-    if (!personInfo.phone) {
-        return { success: false, message: "Para cancelar, preciso do seu telefone. Você pode me informar?" };
-    }
-
-    // SINTAXE CORRIGIDA
+    if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
     const q = schedulesRef
         .where('TelefoneCliente', '==', personInfo.phone)
         .where('Status', '==', 'Agendado')
         .where('DataHoraISO', '>', new Date().toISOString());
-        
-    const snapshot = await q.get(); // Usa .get()
-
-    if (snapshot.empty) {
-        return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone para cancelar.` };
-    }
-    
+    const snapshot = await q.get();
+    if (snapshot.empty) return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone para cancelar.` };
     let count = 0;
     for (const doc of snapshot.docs) {
-        await doc.ref.update({ Status: 'Cancelado' }); // Usa doc.ref.update()
+        await doc.ref.update({ Status: 'Cancelado' });
         count++;
     }
-    
-    return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei para o seu telefone.` };
+    return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.` };
 }
 
 async function checkBusinessHours(date, duracaoMinutos, db) {
     const dayOfWeek = date.getDay();
-    // SINTAXE CORRIGIDA
     const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    // ... (resto da lógica é matemática e não muda) ...
-    if (!docSnap.exists) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    if (!docSnap.exists()) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    
     const dayConfig = docSnap.data();
-    const timeToDecimal = (str) => { if (!str) return 0; const [h, m] = str.split(':').map(Number); return h + (m || 0) / 60; };
+    const timeToDecimal = (str) => {
+        if (!str) return 0;
+        const [h, m] = str.split(':').map(Number);
+        return h + (m || 0) / 60;
+    };
     const requestedTime = date.getHours() + date.getMinutes() / 60;
     const serviceDurationInHours = duracaoMinutos / 60;
+
+    // --- LOG DE DEPURAÇÃO ADICIONADO ---
+    console.log("--- Depurando checkBusinessHours ---");
+    console.log({
+        requestedTime: requestedTime,
+        serviceDurationInHours: serviceDurationInHours,
+        calculatedEndTime: requestedTime + serviceDurationInHours,
+        morningStart: timeToDecimal(dayConfig.InicioManha),
+        morningEnd: timeToDecimal(dayConfig.FimManha),
+        afternoonStart: timeToDecimal(dayConfig.InicioTarde),
+        afternoonEnd: timeToDecimal(dayConfig.FimTarde)
+    });
+    // --- FIM DO LOG ---
+
     const isWithinHours = (time, start, end) => {
         if (!start || !end) return false;
         return time >= timeToDecimal(start) && (time + serviceDurationInHours) <= timeToDecimal(end);
     };
+
     if (isWithinHours(requestedTime, dayConfig.InicioManha, dayConfig.FimManha) || isWithinHours(requestedTime, dayConfig.InicioTarde, dayConfig.FimTarde)) {
         return { isOpen: true };
     } else {
@@ -149,7 +155,6 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
     const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
     
-    // SINTAXE CORRIGIDA
     const schedulesRef = db.collection(CONFIG.collections.schedules);
     const q = schedulesRef 
         .where('Status', '==', 'Agendado')
@@ -161,7 +166,7 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
         const existingStart = new Date(existingData.DataHoraISO).getTime();
-        const existingEnd = existingStart + (existingData.duracaoMinutos * 60 * 1000);
+        const existingEnd = existingStart + ((existingData.duracaoMinutos || 60) * 60 * 1000);
         if (requestedStart < existingEnd && requestedEnd > existingStart) {
             return true;
         }
@@ -181,7 +186,6 @@ async function saveAppointment(personInfo, requestedDate, servico, db) {
         servicoNome: servico.nome,
         duracaoMinutos: servico.duracaoMinutos,
     };
-    // SINTAXE CORRIGIDA
     await db.collection(CONFIG.collections.schedules).add(newAppointment);
 }
 
