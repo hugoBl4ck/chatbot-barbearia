@@ -81,66 +81,59 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
-// =================================================================
-// FUNÇÃO checkBusinessHours
-// =================================================================
 async function checkBusinessHours(date, duracaoMinutos, db) {
+    console.log("--- INICIANDO VERIFICAÇÃO DE HORÁRIO (V3) ---");
+    
     const dayOfWeek = date.getDay();
     const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
     
     if (!docSnap.exists) {
-        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+        const msg = `Desculpe, não funcionamos neste dia (dia da semana: ${dayOfWeek}).`;
+        console.log(msg);
+        return { isOpen: false, message: msg };
     }
     
     const dayConfig = docSnap.data();
-    const timeToMinutes = (str) => {
-        if (!str) return null; // Retorna null se o horário não estiver definido
-        const [h, m] = str.split(':').map(Number);
-        return (h * 60) + (m || 0);
+    
+    const timeStringToMinutes = (timeStr) => {
+        if (!timeStr || typeof timeStr !== 'string') return null;
+        const [hours, minutes] = timeStr.split(':').map(Number);
+        return hours * 60 + (minutes || 0);
     };
 
     const requestedStartMinutes = date.getHours() * 60 + date.getMinutes();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
 
-    // Períodos de trabalho em minutos do dia
-    const morningStart = timeToMinutes(dayConfig.InicioManha);
-    const morningEnd = timeToMinutes(dayConfig.FimManha);
-    const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
-    const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
+    const morningStart = timeStringToMinutes(dayConfig.InicioManha);
+    const morningEnd = timeStringToMinutes(dayConfig.FimManha);
+    const afternoonStart = timeStringToMinutes(dayConfig.InicioTarde);
+    const afternoonEnd = timeStringToMinutes(dayConfig.FimTarde);
 
-    // Lista de todos os períodos ABERTOS
-    const openSlots = [];
-    if (morningStart !== null && morningEnd !== null) {
-        openSlots.push({ start: morningStart, end: morningEnd });
-    }
-    if (afternoonStart !== null && afternoonEnd !== null) {
-        openSlots.push({ start: afternoonStart, end: afternoonEnd });
-    }
-    
-    if (openSlots.length === 0) {
-        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
-    }
+    console.log("Valores para verificação:", {
+        solicitado: `${requestedStartMinutes} -> ${requestedEndMinutes}`,
+        manha: `${morningStart} -> ${morningEnd}`,
+        tarde: `${afternoonStart} -> ${afternoonEnd}`
+    });
 
-    // Verifica se o agendamento cabe em ALGUM dos períodos abertos
-    let fitsInSchedule = false;
-    for (const slot of openSlots) {
-        if (requestedStartMinutes >= slot.start && requestedEndMinutes <= slot.end) {
-            fitsInSchedule = true;
-            break; // Encontrou um período válido, pode parar de verificar
-        }
-    }
+    const fitsInMorning = (morningStart !== null && morningEnd !== null) &&
+                          (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
 
-    if (fitsInSchedule) {
+    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) &&
+                            (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+
+    if (fitsInMorning || fitsInAfternoon) {
+        console.log("VEREDICTO: Horário VÁLIDO.");
         return { isOpen: true };
     } else {
         const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
         const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
-        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
+        const msg = `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.`;
+        console.log("VEREDICTO: Horário INVÁLIDO.");
+        return { isOpen: false, message: msg };
     }
 }
 
-// Cole o restante das funções aqui para garantir a integridade do arquivo
 async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
@@ -151,6 +144,7 @@ async function handleCancellation(personInfo, db) {
     for (const doc of snapshot.docs) { await doc.ref.update({ Status: 'Cancelado' }); count++; }
     return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.` };
 }
+
 async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const serviceDurationMs = duracaoMinutos * 60 * 1000;
     const requestedStart = requestedDate.getTime();
@@ -168,6 +162,7 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     }
     return false;
 }
+
 async function saveAppointment(personInfo, requestedDate, servico, db) {
     const newAppointment = {
         NomeCliente: personInfo.name, TelefoneCliente: personInfo.phone, DataHoraISO: requestedDate.toISOString(),
