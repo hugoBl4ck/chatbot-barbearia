@@ -1,18 +1,10 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO FUNCIONAL COM CORREÇÃO DE TIMEZONE)
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO FINAL COM CHRONO CORRIGIDO)
 // =================================================================
 
 const express = require("express");
 const admin = require('firebase-admin');
-const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
-require('dayjs/locale/pt-br');
-
-// Configuração do Day.js com plugins de timezone
-dayjs.extend(utc);
-dayjs.extend(timezone);
-dayjs.locale('pt-br');
+const chrono = require('chrono-node');
 
 const app = express();
 app.use(express.json());
@@ -31,42 +23,6 @@ if (!admin.apps.length) {
     admin.initializeApp({ credential: admin.credential.cert(CONFIG.firebaseCreds) });
 }
 
-// FUNÇÃO DE PARSING DE DATA (VERSÃO DO ESPECIALISTA, CORRIGIDA COM TIMEZONE)
-function parseDateTime(texto, tz) {
-    const lower = texto.toLowerCase();
-    // AQUI ESTÁ A CORREÇÃO CRÍTICA: Inicia o dayjs já no fuso horário correto.
-    let date = dayjs().tz(tz); 
-
-    if (lower.includes('depois de amanhã')) {
-        date = date.add(2, 'day');
-    } else if (lower.includes('amanhã')) {
-        date = date.add(1, 'day');
-    }
-
-    const diasDaSemana = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
-    for (let i = 0; i < diasDaSemana.length; i++) {
-        if (lower.includes(diasDaSemana[i])) {
-            const hojeDow = date.day();
-            let diff = i - hojeDow;
-            if (diff < 0) diff += 7;
-            date = date.add(diff, 'day');
-            break;
-        }
-    }
-
-    const timeMatch = lower.match(/(\d{1,2})(?::(\d{2}))?/);
-    if (timeMatch) {
-        const hora = parseInt(timeMatch[1], 10);
-        const minuto = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-        date = date.hour(hora).minute(minuto).second(0).millisecond(0);
-    } else {
-        return null;
-    }
-    
-    return date.toDate();
-}
-
-
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
     console.log("\n🔄 === NOVO REQUEST WEBHOOK (LANDBOT) ===", JSON.stringify(body, null, 2));
@@ -77,11 +33,25 @@ app.post("/api/webhook", async (request, response) => {
         let resultPayload;
 
         if (intent === 'agendarHorario') {
-            const parsedDate = parseDateTime(data_hora_texto, CONFIG.timezone); // Passa o timezone para a função
-            if (!parsedDate || isNaN(parsedDate.getTime())) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente um formato como 'amanhã às 10h'." };
+            // Usa o chrono, que é excelente para texto livre, mas ajustamos o fuso
+            const results = chrono.pt.parse(data_hora_texto, new Date(), { forwardDate: true });
+            
+            if (!results || results.length === 0) {
+                resultPayload = { success: false, message: "Não consegui entender a data e hora." };
             } else {
-                console.log("Data interpretada com dayjs (Timezone-Aware):", parsedDate.toString());
+                // Pega a data interpretada e FORÇA ela para o fuso de São Paulo
+                let parsedDate = results[0].start.date();
+                console.log("Data interpretada por Chrono (antes do ajuste):", parsedDate.toString());
+
+                // Lógica de ajuste de fuso horário explícita
+                const offsetSaoPaulo = -3 * 60; // -3 horas em minutos
+                const offsetLocal = new Date().getTimezoneOffset();
+                const diffEmMinutos = offsetLocal - (-offsetSaoPaulo);
+                
+                parsedDate = new Date(parsedDate.getTime() - diffEmMinutos * 60 * 1000);
+                
+                console.log("Data APÓS ajuste para São Paulo:", parsedDate.toString());
+
                 const personInfo = { name: nome, phone: telefone };
                 resultPayload = await handleScheduling(personInfo, parsedDate, servicoId, db);
             }
@@ -102,6 +72,9 @@ app.post("/api/webhook", async (request, response) => {
     }
 });
     
+// O restante do código (handleScheduling, checkBusinessHours, etc.) permanece o mesmo.
+// Cole as funções completas abaixo para garantir a integridade.
+
 async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
@@ -153,7 +126,6 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
         return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
 }
-
 async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
