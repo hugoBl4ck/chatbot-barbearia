@@ -1,23 +1,18 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO SERVERLESS-SAFE)
+// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO ESTÁVEL E FINAL)
 // =================================================================
 
 const express = require("express");
 const admin = require('firebase-admin');
 const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
 require('dayjs/locale/pt-br');
-
-// Configuração do Day.js com plugins
-dayjs.extend(utc);
-dayjs.extend(timezone);
 dayjs.locale('pt-br');
 
 const app = express();
 app.use(express.json());
 
 const CONFIG = {
+    firebaseCreds: JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'),
     timezone: 'America/Sao_Paulo',
     collections: { 
         schedules: 'Agendamentos', 
@@ -26,47 +21,24 @@ const CONFIG = {
     }
 };
 
-// --- FUNÇÃO PARA GARANTIR A INICIALIZAÇÃO DO FIREBASE ---
-function initializeFirebase() {
-    // A variável de ambiente é lida aqui dentro para garantir que está disponível
-    const firebaseCredentials = JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}');
-    
-    if (!admin.apps.length) {
-        console.log("Inicializando Firebase Admin SDK...");
-        admin.initializeApp({
-            credential: admin.credential.cert(firebaseCredentials)
-        });
-    }
-    return admin.firestore();
+if (!admin.apps.length) {
+    admin.initializeApp({ credential: admin.credential.cert(CONFIG.firebaseCreds) });
 }
 
-// --- FUNÇÃO DE PARSING DE DATA (DAYJS) ---
-function parseDateTime(texto, tz) {
+// FUNÇÃO DE PARSING DE DATA (VERSÃO SIMPLES E FUNCIONAL)
+function parseDateTime(texto) {
     const lower = texto.toLowerCase();
-    let date = dayjs().tz(tz);
+    let date = dayjs().startOf('day');
     
-    if (lower.includes('depois de amanhã')) {
-        date = date.add(2, 'day');
-    } else if (lower.includes('amanhã')) {
+    if (lower.includes('amanhã')) {
         date = date.add(1, 'day');
-    }
-
-    const diasDaSemana = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
-    for (let i = 0; i < diasDaSemana.length; i++) {
-        if (lower.includes(diasDaSemana[i])) {
-            const hojeDow = date.day();
-            let diff = i - hojeDow;
-            if (diff < 0) diff += 7;
-            date = date.add(diff, 'day');
-            break;
-        }
     }
 
     const timeMatch = lower.match(/(\d{1,2})(?::(\d{2}))?/);
     if (timeMatch) {
         const hora = parseInt(timeMatch[1], 10);
         const minuto = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-        date = date.hour(hora).minute(minuto).second(0).millisecond(0);
+        date = date.hour(hora).minute(minuto).second(0);
     } else {
         return null;
     }
@@ -75,22 +47,21 @@ function parseDateTime(texto, tz) {
 }
 
 
-// --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
     console.log("\n🔄 === NOVO REQUEST WEBHOOK (LANDBOT) ===", JSON.stringify(body, null, 2));
 
     try {
-        const db = initializeFirebase(); // Garante conexão válida a cada chamada
         const { intent, nome, telefone, data_hora_texto, servicoId } = body;
+        const db = admin.firestore();
         let resultPayload;
 
         if (intent === 'agendarHorario') {
-            const parsedDate = parseDateTime(data_hora_texto, CONFIG.timezone);
+            const parsedDate = parseDateTime(data_hora_texto);
             if (!parsedDate || isNaN(parsedDate.getTime())) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente um formato como 'amanhã às 10h'." };
+                resultPayload = { success: false, message: "Não consegui entender a data e hora." };
             } else {
-                console.log("Data interpretada com dayjs (Timezone-Aware):", parsedDate.toString());
+                console.log("Data interpretada (fuso do servidor):", parsedDate.toString());
                 const personInfo = { name: nome, phone: telefone };
                 resultPayload = await handleScheduling(personInfo, parsedDate, servicoId, db);
             }
@@ -111,11 +82,15 @@ app.post("/api/webhook", async (request, response) => {
     }
 });
     
-// --- FUNÇÕES DE LÓGICA DE NEGÓCIOS ---
 async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
-    if (requestedDate.getTime() <= new Date().getTime()) return { success: false, message: "Não é possível agendar no passado." };
+    
+    // A verificação do passado precisa ser consciente do fuso
+    const agoraEmSaoPaulo = new Date(new Date().toLocaleString("en-US", { timeZone: CONFIG.timezone }));
+    if (requestedDate.getTime() <= agoraEmSaoPaulo.getTime()) {
+        return { success: false, message: "Não é possível agendar no passado." };
+    }
 
     const servicoRef = db.collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
@@ -163,6 +138,7 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
         return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
 }
+
 async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
