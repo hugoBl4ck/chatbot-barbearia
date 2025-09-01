@@ -8,7 +8,7 @@ const dayjs = require('dayjs');
 const timezone = require('dayjs/plugin/timezone');
 const utc = require('dayjs/plugin/utc');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
-const 'dayjs/locale/pt-br');
+require('dayjs/locale/pt-br');
 
 // Configurar dayjs
 dayjs.extend(utc);
