@@ -1,17 +1,11 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO FINAL COM DAY.JS CORRETO)
+// WEBHOOK FINAL - COMBINANDO A LÓGICA DE PARSING QUE FUNCIONOU
 // =================================================================
 
 const express = require("express");
 const admin = require('firebase-admin');
 const dayjs = require('dayjs');
-// IMPORTAÇÃO CORRETA DOS PLUGINS
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
 require('dayjs/locale/pt-br');
-
-dayjs.extend(utc);
-dayjs.extend(timezone);
 dayjs.locale('pt-br');
 
 const app = express();
@@ -20,36 +14,26 @@ app.use(express.json());
 const CONFIG = {
     firebaseCreds: JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'),
     timezone: 'America/Sao_Paulo',
-    collections: { 
-        schedules: 'Agendamentos', 
-        config: 'Horarios',
-        services: 'Servicos'
-    }
+    collections: { schedules: 'Agendamentos', config: 'Horarios', services: 'Servicos' }
 };
 
 if (!admin.apps.length) {
     admin.initializeApp({ credential: admin.credential.cert(CONFIG.firebaseCreds) });
 }
 
-// FUNÇÃO DE PARSING DE DATA COM TIMEZONE
-function parseDateTime(texto, tz) {
+// FUNÇÃO DE PARSING DE DATA DO ESPECIALISTA (A QUE FUNCIONOU)
+function parseDateTime(texto) {
     const lower = texto.toLowerCase();
-    let date = dayjs().tz(tz);
-    
-    if (lower.includes('depois de amanhã')) {
-        date = date.add(2, 'day');
-    } else if (lower.includes('amanhã')) {
-        date = date.add(1, 'day');
-    }
+    let date = dayjs().startOf('day');
 
-    const diasDaSemana = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
-    for (let i = 0; i < diasDaSemana.length; i++) {
-        if (lower.includes(diasDaSemana[i])) {
-            const hojeDow = date.day();
-            let diff = i - hojeDow;
-            if (diff < 0) diff += 7;
-            date = date.add(diff, 'day');
-            break;
+    if (lower.includes('amanhã')) {
+        date = date.add(1, 'day');
+    } else if (!lower.includes('hoje')) {
+        const dateMatch = lower.match(/(\d{1,2})[\/\-](\d{1,2})/);
+        if (dateMatch) {
+            const dia = parseInt(dateMatch[1], 10);
+            const mes = parseInt(dateMatch[2], 10);
+            date = date.date(dia).month(mes - 1);
         }
     }
 
@@ -57,30 +41,46 @@ function parseDateTime(texto, tz) {
     if (timeMatch) {
         const hora = parseInt(timeMatch[1], 10);
         const minuto = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-        date = date.hour(hora).minute(minuto).second(0).millisecond(0);
+        date = date.hour(hora).minute(minuto).second(0);
     } else {
-        return null;
+        return null; // Retorna null se não encontrar a hora
     }
-    
+
     return date.toDate();
 }
 
+app.post("/api/webhook", async (request, response) => {
+    // ... (O código da rota principal permanece o mesmo)
+});
+    
+async function handleScheduling(personInfo, requestedDate, servicoId, db) {
+    // ... (O código desta função permanece o mesmo)
+}
+
+async function checkBusinessHours(date, duracaoMinutos, db) {
+    // ... (Vamos usar a nossa última versão desta função, que lida com o almoço)
+}
+
+// O resto do código (handleCancellation, checkConflicts, etc.) permanece o mesmo.
+// ...
+
+// =================================================================
+// CÓDIGO COMPLETO ABAIXO
+// =================================================================
 
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
     console.log("\n🔄 === NOVO REQUEST WEBHOOK (LANDBOT) ===", JSON.stringify(body, null, 2));
-
     try {
         const { intent, nome, telefone, data_hora_texto, servicoId } = body;
         const db = admin.firestore();
         let resultPayload;
-
         if (intent === 'agendarHorario') {
-            const parsedDate = parseDateTime(data_hora_texto, CONFIG.timezone);
+            const parsedDate = parseDateTime(data_hora_texto);
             if (!parsedDate || isNaN(parsedDate.getTime())) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente um formato como 'amanhã às 10h'." };
+                resultPayload = { success: false, message: "Não consegui entender a data e hora." };
             } else {
-                console.log("Data interpretada com dayjs (Timezone-Aware):", parsedDate.toString());
+                console.log("Data interpretada com dayjs (SIMPLES):", parsedDate.toString());
                 const personInfo = { name: nome, phone: telefone };
                 resultPayload = await handleScheduling(personInfo, parsedDate, servicoId, db);
             }
@@ -90,21 +90,14 @@ app.post("/api/webhook", async (request, response) => {
         } else {
             resultPayload = { success: false, message: "Desculpe, não entendi sua intenção." };
         }
-        
         const responseData = { status: resultPayload.success ? 'success' : 'error', message: resultPayload.message };
         console.log(`📤 RESPOSTA ENVIADA:`, JSON.stringify(responseData, null, 2));
         return response.json(responseData);
-
     } catch (error) {
         console.error("❌ Erro CRÍTICO no webhook:", error);
         return response.json({ status: 'error', message: "Desculpe, ocorreu um erro interno." });
     }
 });
-    
-// ... (O RESTANTE DO CÓDIGO PERMANECE O MESMO)
-// (handleScheduling, checkBusinessHours, etc.)
-
-// Cole o restante do código aqui
 async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais (nome/telefone)." };
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço para agendar." };
@@ -144,6 +137,11 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
         return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
 }
+async function handleCancellation(personInfo, db) { /* ... */ }
+async function checkConflicts(requestedDate, duracaoMinutos, db) { /* ... */ }
+async function saveAppointment(personInfo, requestedDate, servico, db) { /* ... */ }
+
+// Cole o restante das funções aqui
 async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
