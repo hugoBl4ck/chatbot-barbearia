@@ -1,10 +1,20 @@
 // =================================================================
-// WEBHOOK PARA AGENDAMENTO DE BARBEARIA (VERSÃO FINAL COM CHRONO CORRIGIDO)
+// WEBHOOK COM DAYJS - SOLUÇÃO MAIS ROBUSTA
 // =================================================================
 
 const express = require("express");
 const admin = require('firebase-admin');
-const chrono = require('chrono-node');
+const dayjs = require('dayjs');
+const timezone = require('dayjs/plugin/timezone');
+const utc = require('dayjs/plugin/utc');
+const customParseFormat = require('dayjs/plugin/customParseFormat');
+const 'dayjs/locale/pt-br');
+
+// Configurar dayjs
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(customParseFormat);
+dayjs.locale('pt-br');
 
 const app = express();
 app.use(express.json());
@@ -23,6 +33,72 @@ if (!admin.apps.length) {
     admin.initializeApp({ credential: admin.credential.cert(CONFIG.firebaseCreds) });
 }
 
+// Função para parsear texto em data
+function parseDateTime(text) {
+    const now = dayjs().tz(CONFIG.timezone);
+    const tomorrow = now.add(1, 'day');
+    
+    // Normalizar texto
+    text = text.toLowerCase().trim();
+    
+    // Padrões de reconhecimento
+    const patterns = [
+        // "amanhã às 16h", "amanha as 16:00"
+        {
+            regex: /(?:amanh[aã]|amanha)\s+(?:[aà]s?)\s+(\d{1,2})(?::(\d{2}))?h?/,
+            handler: (match) => {
+                const hour = parseInt(match[1]);
+                const minute = parseInt(match[2] || '0');
+                return tomorrow.hour(hour).minute(minute).second(0).millisecond(0);
+            }
+        },
+        // "hoje às 16h"
+        {
+            regex: /hoje\s+(?:[aà]s?)\s+(\d{1,2})(?::(\d{2}))?h?/,
+            handler: (match) => {
+                const hour = parseInt(match[1]);
+                const minute = parseInt(match[2] || '0');
+                return now.hour(hour).minute(minute).second(0).millisecond(0);
+            }
+        },
+        // "16h", "16:30"
+        {
+            regex: /^(\d{1,2})(?::(\d{2}))?h?$/,
+            handler: (match) => {
+                const hour = parseInt(match[1]);
+                const minute = parseInt(match[2] || '0');
+                let date = now.hour(hour).minute(minute).second(0).millisecond(0);
+                // Se o horário já passou hoje, assumir que é amanhã
+                if (date.isBefore(now)) {
+                    date = date.add(1, 'day');
+                }
+                return date;
+            }
+        },
+        // "31/08 às 16h", "31/08/2025 16:30"
+        {
+            regex: /(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?\s+(?:[aà]s?\s+)?(\d{1,2})(?::(\d{2}))?h?/,
+            handler: (match) => {
+                const day = parseInt(match[1]);
+                const month = parseInt(match[2]);
+                const year = parseInt(match[3] || now.year());
+                const hour = parseInt(match[4]);
+                const minute = parseInt(match[5] || '0');
+                return dayjs().tz(CONFIG.timezone).year(year).month(month - 1).date(day).hour(hour).minute(minute).second(0).millisecond(0);
+            }
+        }
+    ];
+    
+    for (const pattern of patterns) {
+        const match = text.match(pattern.regex);
+        if (match) {
+            return pattern.handler(match);
+        }
+    }
+    
+    return null;
+}
+
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
     console.log("\n🔄 === NOVO REQUEST WEBHOOK (LANDBOT) ===", JSON.stringify(body, null, 2));
@@ -33,27 +109,20 @@ app.post("/api/webhook", async (request, response) => {
         let resultPayload;
 
         if (intent === 'agendarHorario') {
-            // Usa o chrono, que é excelente para texto livre, mas ajustamos o fuso
-            const results = chrono.pt.parse(data_hora_texto, new Date(), { forwardDate: true });
+            const parsedDate = parseDateTime(data_hora_texto);
             
-            if (!results || results.length === 0) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora." };
+            if (!parsedDate) {
+                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou '16:30'." };
             } else {
-                // Pega a data interpretada e FORÇA ela para o fuso de São Paulo
-                let parsedDate = results[0].start.date();
-                console.log("Data interpretada por Chrono (antes do ajuste):", parsedDate.toString());
-
-                // Lógica de ajuste de fuso horário explícita
-                const offsetSaoPaulo = -3 * 60; // -3 horas em minutos
-                const offsetLocal = new Date().getTimezoneOffset();
-                const diffEmMinutos = offsetLocal - (-offsetSaoPaulo);
+                console.log("📅 Data parseada:", parsedDate.format('DD/MM/YYYY HH:mm'));
+                console.log("📅 Em UTC:", parsedDate.utc().format());
                 
-                parsedDate = new Date(parsedDate.getTime() - diffEmMinutos * 60 * 1000);
-                
-                console.log("Data APÓS ajuste para São Paulo:", parsedDate.toString());
+                // Converter para objeto Date JavaScript para uso no resto do código
+                const dateForStorage = parsedDate.utc().toDate();
+                const dateForValidation = parsedDate.toDate();
 
                 const personInfo = { name: nome, phone: telefone };
-                resultPayload = await handleScheduling(personInfo, parsedDate, servicoId, db);
+                resultPayload = await handleScheduling(personInfo, dateForStorage, dateForValidation, servicoId, db);
             }
         } else if (intent === 'cancelarHorario') {
              const personInfo = { phone: telefone };
@@ -71,11 +140,9 @@ app.post("/api/webhook", async (request, response) => {
         return response.json({ status: 'error', message: "Desculpe, ocorreu um erro interno." });
     }
 });
-    
-// O restante do código (handleScheduling, checkBusinessHours, etc.) permanece o mesmo.
-// Cole as funções completas abaixo para garantir a integridade.
 
-async function handleScheduling(personInfo, requestedDate, servicoId, db) {
+// Resto das funções permanecem iguais à versão anterior
+async function handleScheduling(personInfo, requestedDate, localTime, servicoId, db) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
     if (requestedDate.getTime() <= new Date().getTime()) return { success: false, message: "Não é possível agendar no passado." };
@@ -86,7 +153,7 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
     
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
 
-    const businessHoursCheck = await checkBusinessHours(requestedDate, servico.duracaoMinutos, db);
+    const businessHoursCheck = await checkBusinessHours(localTime, servico.duracaoMinutos, db);
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
 
     const hasConflict = await checkConflicts(requestedDate, servico.duracaoMinutos, db);
@@ -94,7 +161,7 @@ async function handleScheduling(personInfo, requestedDate, servicoId, db) {
 
     await saveAppointment(personInfo, requestedDate, servico, db);
     
-    const formattedDateForUser = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeStyle: 'short', timeZone: CONFIG.timezone }).format(requestedDate);
+    const formattedDateForUser = dayjs(requestedDate).tz(CONFIG.timezone).format('dddd, DD [de] MMMM [às] HH:mm');
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
@@ -105,18 +172,29 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
     if (!docSnap.exists) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
     
     const dayConfig = docSnap.data();
-    const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
+    const timeToMinutes = (str) => { 
+        if (!str) return null; 
+        const [h, m] = str.split(':').map(Number); 
+        return (h * 60) + (m || 0); 
+    };
+    
+    console.log("🕐 Verificando horário comercial para:", date.toString());
+    console.log("🕐 Configuração do dia:", dayConfig);
     
     const requestedStartMinutes = date.getHours() * 60 + date.getMinutes();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
+    
+    console.log(`🕐 Horário solicitado: ${Math.floor(requestedStartMinutes/60)}:${String(requestedStartMinutes%60).padStart(2,'0')} - ${Math.floor(requestedEndMinutes/60)}:${String(requestedEndMinutes%60).padStart(2,'0')}`);
 
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
 
-    const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
-    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+    const fitsInMorning = (morningStart !== null && morningEnd !== null) && 
+                         (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
+    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && 
+                           (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
 
     if (fitsInMorning || fitsInAfternoon) {
         return { isOpen: true };
@@ -126,39 +204,64 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
         return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
 }
+
 async function handleCancellation(personInfo, db) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
     const schedulesRef = db.collection(CONFIG.collections.schedules);
-    const q = schedulesRef.where('TelefoneCliente', '==', personInfo.phone).where('Status', '==', 'Agendado').where('DataHoraISO', '>', new Date().toISOString());
+    const q = schedulesRef
+        .where('TelefoneCliente', '==', personInfo.phone)
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>', new Date().toISOString());
     const snapshot = await q.get();
     if (snapshot.empty) return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone.` };
+    
     let count = 0;
-    for (const doc of snapshot.docs) { await doc.ref.update({ Status: 'Cancelado' }); count++; }
+    for (const doc of snapshot.docs) { 
+        await doc.ref.update({ Status: 'Cancelado' }); 
+        count++; 
+    }
     return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.` };
 }
+
 async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const serviceDurationMs = duracaoMinutos * 60 * 1000;
     const requestedStart = requestedDate.getTime();
     const requestedEnd = requestedStart + serviceDurationMs;
+    
     const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
     const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
+    
     const schedulesRef = db.collection(CONFIG.collections.schedules);
-    const q = schedulesRef.where('Status', '==', 'Agendado').where('DataHoraISO', '>=', searchStart.toISOString()).where('DataHoraISO', '<=', searchEnd.toISOString());
+    const q = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', searchStart.toISOString())
+        .where('DataHoraISO', '<=', searchEnd.toISOString());
+    
     const snapshot = await q.get();
+    
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
         const existingStart = new Date(existingData.DataHoraISO).getTime();
         const existingEnd = existingStart + ((existingData.duracaoMinutos || 60) * 60 * 1000);
-        if (requestedStart < existingEnd && requestedEnd > existingStart) { return true; }
+        
+        if (requestedStart < existingEnd && requestedEnd > existingStart) { 
+            return true; 
+        }
     }
     return false;
 }
+
 async function saveAppointment(personInfo, requestedDate, servico, db) {
     const newAppointment = {
-        NomeCliente: personInfo.name, TelefoneCliente: personInfo.phone, DataHoraISO: requestedDate.toISOString(),
-        DataHoraFormatada: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: CONFIG.timezone }).format(requestedDate),
-        Status: 'Agendado', TimestampAgendamento: new Date().toISOString(),
-        servicoId: servico.id, servicoNome: servico.nome, duracaoMinutos: servico.duracaoMinutos,
+        NomeCliente: personInfo.name,
+        TelefoneCliente: personInfo.phone,
+        DataHoraISO: requestedDate.toISOString(),
+        DataHoraFormatada: dayjs(requestedDate).tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm'),
+        Status: 'Agendado',
+        TimestampAgendamento: new Date().toISOString(),
+        servicoId: servico.id,
+        servicoNome: servico.nome,
+        duracaoMinutos: servico.duracaoMinutos,
     };
     await db.collection(CONFIG.collections.schedules).add(newAppointment);
 }
