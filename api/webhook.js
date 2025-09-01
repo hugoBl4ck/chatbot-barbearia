@@ -119,7 +119,19 @@ app.post("/api/webhook", async (request, response) => {
                 
                 // Converter para objeto Date JavaScript para uso no resto do código
                 const dateForStorage = parsedDate.utc().toDate();
-                const dateForValidation = parsedDate.toDate();
+                // CORREÇÃO: criar uma data local "fake" só para validação de horário
+                const dateForValidation = new Date(
+                    parsedDate.year(),
+                    parsedDate.month(),
+                    parsedDate.date(),
+                    parsedDate.hour(),
+                    parsedDate.minute(),
+                    0,
+                    0
+                );
+
+                console.log("📅 Data para storage (UTC):", dateForStorage.toISOString());
+                console.log("📅 Data para validação (local):", dateForValidation.toString());
 
                 const personInfo = { name: nome, phone: telefone };
                 resultPayload = await handleScheduling(personInfo, dateForStorage, dateForValidation, servicoId, db);
