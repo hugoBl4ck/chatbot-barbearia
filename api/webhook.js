@@ -169,7 +169,11 @@ async function handleScheduling(personInfo, requestedDate, localTime, servicoId,
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
 
     const hasConflict = await checkConflicts(requestedDate, servico.duracaoMinutos, db);
-    if (hasConflict) return { success: false, message: "Este horário já está ocupado. Por favor, escolha outro." };
+    if (hasConflict) {
+        console.log("⚠️ Conflito detectado, buscando horários alternativos...");
+        const suggestions = await getAvailableSlots(requestedDate, servico.duracaoMinutos, db);
+        return { success: false, message: suggestions };
+    }
 
     await saveAppointment(personInfo, requestedDate, servico, db);
     
@@ -215,6 +219,119 @@ async function checkBusinessHours(date, duracaoMinutos, db) {
         const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
         return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
+}
+
+async function getAvailableSlots(requestedDate, duracaoMinutos, db) {
+    try {
+        const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
+        const today = requestedDateDayjs;
+        const tomorrow = requestedDateDayjs.add(1, 'day');
+
+        // Buscar slots do dia solicitado
+        let availableSlots = await findAvailableSlotsForDay(today, duracaoMinutos, db);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = today.format('DD/MM/YYYY');
+            const slotsText = availableSlots.slice(0, 3).join(', '); // Máximo 3 sugestões
+            return `Este horário já está ocupado. Que tal um destes horários disponíveis para ${dateStr}? ${slotsText}`;
+        }
+        
+        // Se não há slots hoje, buscar amanhã
+        availableSlots = await findAvailableSlotsForDay(tomorrow, duracaoMinutos, db);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = tomorrow.format('DD/MM/YYYY');
+            const slotsText = availableSlots.slice(0, 3).join(', '); // Máximo 3 sugestões
+            return `Este horário já está ocupado e não há mais vagas hoje. Que tal agendar para ${dateStr}? Horários disponíveis: ${slotsText}`;
+        }
+        
+        return "Este horário já está ocupado. Infelizmente não encontrei horários disponíveis para hoje nem amanhã. Tente outro dia.";
+        
+    } catch (error) {
+        console.error("Erro ao buscar horários disponíveis:", error);
+        return "Este horário já está ocupado. Tente outro horário.";
+    }
+}
+
+async function findAvailableSlotsForDay(dayDate, duracaoMinutos, db) {
+    const dayOfWeek = dayDate.day();
+    
+    // Buscar configuração do dia
+    const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
+    const docSnap = await docRef.get();
+    if (!docSnap.exists) return [];
+    
+    const dayConfig = docSnap.data();
+    const timeToMinutes = (str) => { 
+        if (!str) return null; 
+        const [h, m] = str.split(':').map(Number); 
+        return (h * 60) + (m || 0); 
+    };
+
+    const morningStart = timeToMinutes(dayConfig.InicioManha);
+    const morningEnd = timeToMinutes(dayConfig.FimManha);
+    const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
+    const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
+    
+    // Buscar agendamentos existentes do dia
+    const startOfDay = dayDate.startOf('day');
+    const endOfDay = dayDate.endOf('day');
+    
+    const schedulesRef = db.collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', startOfDay.utc().toISOString())
+        .where('DataHoraISO', '<=', endOfDay.utc().toISOString());
+    
+    const snapshot = await q.get();
+    
+    // Criar array de horários ocupados
+    const busySlots = [];
+    snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
+        const endTime = startTime.add(data.duracaoMinutos || 60, 'minutes');
+        busySlots.push({
+            start: startTime.hour() * 60 + startTime.minute(),
+            end: endTime.hour() * 60 + endTime.minute()
+        });
+    });
+    
+    // Gerar slots disponíveis
+    const availableSlots = [];
+    const currentTime = dayjs().tz(CONFIG.timezone);
+    const isToday = dayDate.isSame(currentTime, 'day');
+    
+    // Função para adicionar slots de um período
+    const addSlotsFromPeriod = (startMinutes, endMinutes) => {
+        if (startMinutes === null || endMinutes === null) return;
+        
+        for (let time = startMinutes; time + duracaoMinutos <= endMinutes; time += 30) {
+            const slotDate = dayDate.hour(Math.floor(time / 60)).minute(time % 60);
+            
+            // Se é hoje, só oferece horários futuros (com 1h de antecedência mínima)
+            if (isToday && slotDate.isBefore(currentTime.add(1, 'hour'))) {
+                continue;
+            }
+            
+            // Verificar se há conflito
+            const hasConflict = busySlots.some(busy => 
+                (time < busy.end && (time + duracaoMinutos) > busy.start)
+            );
+            
+            if (!hasConflict) {
+                availableSlots.push(slotDate.format('HH:mm'));
+            }
+        }
+    };
+    
+    // Adicionar slots da manhã
+    addSlotsFromPeriod(morningStart, morningEnd);
+    
+    // Adicionar slots da tarde
+    addSlotsFromPeriod(afternoonStart, afternoonEnd);
+    
+    return availableSlots;
 }
 
 async function handleCancellation(personInfo, db) {
