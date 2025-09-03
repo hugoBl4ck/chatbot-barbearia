@@ -41,8 +41,96 @@ function parseDateTime(text) {
     // Normalizar texto
     text = text.toLowerCase().trim();
     
+    // Mapeamento dos dias da semana
+    const weekDays = {
+        'domingo': 0, 'dom': 0,
+        'segunda': 1, 'seg': 1, 'segunda-feira': 1,
+        'terça': 2, 'ter': 2, 'terca': 2, 'terça-feira': 2, 'terca-feira': 2,
+        'quarta': 3, 'qua': 3, 'quarta-feira': 3,
+        'quinta': 4, 'qui': 4, 'quinta-feira': 4,
+        'sexta': 5, 'sex': 5, 'sexta-feira': 5,
+        'sábado': 6, 'sab': 6, 'sabado': 6
+    };
+    
+    // Função auxiliar para encontrar o próximo dia da semana
+    const getNextWeekday = (targetDay, hour, minute) => {
+        const currentDay = now.day();
+        let daysToAdd = targetDay - currentDay;
+        
+        // Se é o mesmo dia da semana, verifica se o horário já passou
+        if (daysToAdd === 0) {
+            const timeToday = now.hour(hour).minute(minute).second(0).millisecond(0);
+            if (timeToday.isAfter(now)) {
+                // Horário ainda não passou hoje
+                return timeToday;
+            } else {
+                // Horário já passou, vai para a próxima semana
+                daysToAdd = 7;
+            }
+        } else if (daysToAdd < 0) {
+            // Dia da semana já passou esta semana
+            daysToAdd += 7;
+        }
+        
+        return now.add(daysToAdd, 'day').hour(hour).minute(minute).second(0).millisecond(0);
+    };
+    
     // Padrões de reconhecimento
     const patterns = [
+        // "próxima quarta às 10h", "proxima terça as 18h"
+        {
+            regex: /pr[oó]xim[ao]\s+(\w+(?:-feira)?)\s+(?:[aà]s?\s+)?(\d{1,2})(?::(\d{2}))?h?/,
+            handler: (match) => {
+                const dayName = match[1];
+                const hour = parseInt(match[2]);
+                const minute = parseInt(match[3] || '0');
+                
+                if (weekDays.hasOwnProperty(dayName)) {
+                    const targetDay = weekDays[dayName];
+                    // Para "próxima", sempre adiciona pelo menos uma semana
+                    const currentDay = now.day();
+                    let daysToAdd = targetDay - currentDay;
+                    if (daysToAdd <= 0) {
+                        daysToAdd += 7;
+                    } else {
+                        // Se é o mesmo dia e o horário ainda não passou, vai para próxima semana mesmo assim
+                        daysToAdd += 7;
+                    }
+                    return now.add(daysToAdd, 'day').hour(hour).minute(minute).second(0).millisecond(0);
+                }
+                return null;
+            }
+        },
+        // "quarta às 10h", "terça as 18h", "segunda as 9h"
+        {
+            regex: /^(\w+(?:-feira)?)\s+(?:[aà]s?\s+)?(\d{1,2})(?::(\d{2}))?h?$/,
+            handler: (match) => {
+                const dayName = match[1];
+                const hour = parseInt(match[2]);
+                const minute = parseInt(match[3] || '0');
+                
+                if (weekDays.hasOwnProperty(dayName)) {
+                    const targetDay = weekDays[dayName];
+                    return getNextWeekday(targetDay, hour, minute);
+                }
+                return null;
+            }
+        },
+        // "na quarta às 10h", "na terça as 18h"
+        {
+            regex: /na\s+(\w+(?:-feira)?)\s+(?:[aà]s?\s+)?(\d{1,2})(?::(\d{2}))?h?/,
+            handler: (match) => {
+                const dayName = match[1];
+                const hour = parseInt(match[2]);
+                const minute = parseInt(match[3] || '0');
+                
+                if (weekDays.hasOwnProperty(dayName)) {
+                    const targetDay = weekDays[dayName];
+                    return getNextWeekday(targetDay, hour, minute);
+                }
+                return null;
+            }
+        },
         // "amanhã às 16h", "amanha as 16:00"
         {
             regex: /(?:amanh[aã]|amanha)\s+(?:[aà]s?)\s+(\d{1,2})(?::(\d{2}))?h?/,
@@ -88,6 +176,18 @@ function parseDateTime(text) {
             }
         }
     ];
+
+    // Testar cada padrão
+    for (const pattern of patterns) {
+        const match = text.match(pattern.regex);
+        if (match) {
+            const result = pattern.handler(match);
+            if (result) {
+                return result;
+            }
+        }
+    }
+    
     
     for (const pattern of patterns) {
         const match = text.match(pattern.regex);
