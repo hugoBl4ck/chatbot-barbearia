@@ -245,11 +245,11 @@ app.post("/api/webhook", async (request, response) => {
         
         const responseData = { status: resultPayload.success ? 'success' : 'error', message: resultPayload.message };
         console.log(`📤 RESPOSTA ENVIADA:`, JSON.stringify(responseData, null, 2));
-        return response.json(responseData);
+        return response.status(200).json(responseData);
 
     } catch (error) {
         console.error("❌ Erro CRÍTICO no webhook:", error);
-        return response.json({ status: 'error', message: "Desculpe, ocorreu um erro interno." });
+        return response.status(500).json({ status: 'error', message: "Desculpe, ocorreu um erro interno." });
     }
 });
 
