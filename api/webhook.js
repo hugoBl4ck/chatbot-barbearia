@@ -462,7 +462,6 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     
     const schedulesRef = db.collection(CONFIG.collections.schedules);
     const q = schedulesRef
-        .where('Status', '==', 'Agendado')
         .where('DataHoraISO', '>=', searchStart.toISOString())
         .where('DataHoraISO', '<=', searchEnd.toISOString());
     
@@ -470,6 +469,12 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
+        
+        // MUDANÇA: Só considerar conflito se status for 'Agendado'
+        if (existingData.Status !== 'Agendado') {
+            continue;
+        }
+        
         const existingStart = new Date(existingData.DataHoraISO).getTime();
         const existingEnd = existingStart + ((existingData.duracaoMinutos || 60) * 60 * 1000);
         
@@ -481,18 +486,41 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
 }
 
 async function saveAppointment(personInfo, requestedDate, servico, db) {
-    const newAppointment = {
-        NomeCliente: personInfo.name,
-        TelefoneCliente: personInfo.phone,
-        DataHoraISO: requestedDate.toISOString(),
-        DataHoraFormatada: dayjs(requestedDate).tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm'),
-        Status: 'Agendado',
-        TimestampAgendamento: new Date().toISOString(),
-        servicoId: servico.id,
-        servicoNome: servico.nome,
-        duracaoMinutos: servico.duracaoMinutos,
-    };
-    await db.collection(CONFIG.collections.schedules).add(newAppointment);
+    // NOVA LÓGICA: Verificar se existe agendamento cancelado no mesmo horário
+    const schedulesRef = db.collection(CONFIG.collections.schedules);
+    const exactTimeQuery = schedulesRef.where('DataHoraISO', '==', requestedDate.toISOString());
+    const exactTimeSnapshot = await exactTimeQuery.get();
+    
+    const canceledAppointment = exactTimeSnapshot.docs.find(doc => doc.data().Status === 'Cancelado');
+    
+    if (canceledAppointment) {
+        // Atualizar o agendamento cancelado existente
+        await canceledAppointment.ref.update({
+            NomeCliente: personInfo.name,
+            TelefoneCliente: personInfo.phone,
+            Status: 'Agendado',
+            TimestampAgendamento: new Date().toISOString(),
+            servicoId: servico.id,
+            servicoNome: servico.nome,
+            duracaoMinutos: servico.duracaoMinutos,
+            // Manter a mesma DataHoraISO e DataHoraFormatada
+        });
+    } else {
+        // Criar novo agendamento (lógica original)
+        const newAppointment = {
+            NomeCliente: personInfo.name,
+            TelefoneCliente: personInfo.phone,
+            DataHoraISO: requestedDate.toISOString(),
+            DataHoraFormatada: dayjs(requestedDate).tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm'),
+            Status: 'Agendado',
+            TimestampAgendamento: new Date().toISOString(),
+            servicoId: servico.id,
+            servicoNome: servico.nome,
+            duracaoMinutos: servico.duracaoMinutos,
+        };
+        await db.collection(CONFIG.collections.schedules).add(newAppointment);
+    }
 }
+
 
 module.exports = app;
