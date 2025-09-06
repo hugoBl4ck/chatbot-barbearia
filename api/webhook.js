@@ -354,14 +354,21 @@ async function getAvailableSlots(requestedDate, duracaoMinutos, db) {
 }
 
 async function findAvailableSlotsForDay(dayDate, duracaoMinutos, db) {
+    console.log("🔍 DEBUG - Buscando slots disponíveis para:", dayDate.format('DD/MM/YYYY'));
+    
     const dayOfWeek = dayDate.day();
     
     // Buscar configuração do dia
     const docRef = db.collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    if (!docSnap.exists) return [];
+    if (!docSnap.exists) {
+        console.log("❌ Dia não funciona:", dayOfWeek);
+        return [];
+    }
     
     const dayConfig = docSnap.data();
+    console.log("⚙️ Configuração do dia:", dayConfig);
+    
     const timeToMinutes = (str) => { 
         if (!str) return null; 
         const [h, m] = str.split(':').map(Number); 
@@ -378,22 +385,38 @@ async function findAvailableSlotsForDay(dayDate, duracaoMinutos, db) {
     const endOfDay = dayDate.endOf('day');
     
     const schedulesRef = db.collection(CONFIG.collections.schedules);
+    
+    // CORREÇÃO: Buscar agendamentos do dia específico E filtrar apenas os ativos
     const q = schedulesRef
-        .where('Status', '==', 'Agendado');
-        
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', startOfDay.utc().toISOString())
+        .where('DataHoraISO', '<=', endOfDay.utc().toISOString());
     
     const snapshot = await q.get();
     
-    // Criar array de horários ocupados
+    console.log("📋 Agendamentos ATIVOS encontrados para o dia:");
+    snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const horario = dayjs(data.DataHoraISO).tz(CONFIG.timezone).format('HH:mm');
+        console.log(`  - ${data.NomeCliente} | ${horario} | Status: ${data.Status}`);
+    });
+    
+    // Criar array de horários ocupados (apenas com agendamentos ativos)
     const busySlots = [];
     snapshot.docs.forEach(doc => {
         const data = doc.data();
         const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
-        const endTime = startTime.add(data.duracaoMinutos || 60, 'minutes');
-        busySlots.push({
-            start: startTime.hour() * 60 + startTime.minute(),
-            end: endTime.hour() * 60 + endTime.minute()
-        });
+        
+        // VERIFICAÇÃO ADICIONAL: Só considerar se for do mesmo dia
+        if (startTime.isSame(dayDate, 'day')) {
+            const endTime = startTime.add(data.duracaoMinutos || 60, 'minutes');
+            const busySlot = {
+                start: startTime.hour() * 60 + startTime.minute(),
+                end: endTime.hour() * 60 + endTime.minute()
+            };
+            busySlots.push(busySlot);
+            console.log(`  ⛔ Slot ocupado: ${startTime.format('HH:mm')} - ${endTime.format('HH:mm')}`);
+        }
     });
     
     // Gerar slots disponíveis
@@ -401,34 +424,53 @@ async function findAvailableSlotsForDay(dayDate, duracaoMinutos, db) {
     const currentTime = dayjs().tz(CONFIG.timezone);
     const isToday = dayDate.isSame(currentTime, 'day');
     
+    console.log("🕐 Gerando slots disponíveis...");
+    
     // Função para adicionar slots de um período
-    const addSlotsFromPeriod = (startMinutes, endMinutes) => {
+    const addSlotsFromPeriod = (startMinutes, endMinutes, periodo) => {
         if (startMinutes === null || endMinutes === null) return;
+        
+        console.log(`📍 Processando período ${periodo}: ${Math.floor(startMinutes/60)}:${String(startMinutes%60).padStart(2,'0')} - ${Math.floor(endMinutes/60)}:${String(endMinutes%60).padStart(2,'0')}`);
         
         for (let time = startMinutes; time + duracaoMinutos <= endMinutes; time += 30) {
             const slotDate = dayDate.hour(Math.floor(time / 60)).minute(time % 60);
+            const slotTimeStr = slotDate.format('HH:mm');
             
             // Se é hoje, só oferece horários futuros (com 1h de antecedência mínima)
             if (isToday && slotDate.isBefore(currentTime.add(1, 'hour'))) {
+                console.log(`  ⏰ Slot ${slotTimeStr} muito próximo/passado`);
                 continue;
             }
             
-            // Verificar se há conflito
-            const hasConflict = busySlots.some(busy => 
-                (time < busy.end && (time + duracaoMinutos) > busy.start)
-            );
+            // Verificar se há conflito com slots ocupados
+            const hasConflict = busySlots.some(busy => {
+                const slotEnd = time + duracaoMinutos;
+                const overlap = (time < busy.end && slotEnd > busy.start);
+                if (overlap) {
+                    console.log(`  ❌ Slot ${slotTimeStr} conflita com ${Math.floor(busy.start/60)}:${String(busy.start%60).padStart(2,'0')}-${Math.floor(busy.end/60)}:${String(busy.end%60).padStart(2,'0')}`);
+                }
+                return overlap;
+            });
             
             if (!hasConflict) {
-                availableSlots.push(slotDate.format('HH:mm'));
+                availableSlots.push(slotTimeStr);
+                console.log(`  ✅ Slot ${slotTimeStr} disponível`);
             }
         }
     };
     
     // Adicionar slots da manhã
-    addSlotsFromPeriod(morningStart, morningEnd);
+    if (morningStart !== null && morningEnd !== null) {
+        addSlotsFromPeriod(morningStart, morningEnd, "manhã");
+    }
     
     // Adicionar slots da tarde
-    addSlotsFromPeriod(afternoonStart, afternoonEnd);
+    if (afternoonStart !== null && afternoonEnd !== null) {
+        addSlotsFromPeriod(afternoonStart, afternoonEnd, "tarde");
+    }
+    
+    console.log(`🎯 Total de slots disponíveis encontrados: ${availableSlots.length}`);
+    console.log(`📝 Slots: ${availableSlots.join(', ')}`);
     
     return availableSlots;
 }
@@ -456,28 +498,61 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const requestedStart = requestedDate.getTime();
     const requestedEnd = requestedStart + serviceDurationMs;
     
+    console.log("🔍 DEBUG - Verificando conflitos:");
+    console.log("📅 Data solicitada:", requestedDate.toISOString());
+    console.log("⏰ Horário solicitado:", dayjs(requestedDate).tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm'));
+    console.log("⏱️ Duração do serviço:", duracaoMinutos, "minutos");
+    
     const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
     const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
     
     const schedulesRef = db.collection(CONFIG.collections.schedules);
     
-    // CORREÇÃO: Filtrar apenas agendamentos ATIVOS na query
-    const q = schedulesRef
-        .where('Status', '==', 'Agendado')  // Só buscar agendamentos ativos
+    // PRIMEIRA BUSCA: Ver TODOS os agendamentos na janela de tempo
+    const allQuery = schedulesRef
         .where('DataHoraISO', '>=', searchStart.toISOString())
         .where('DataHoraISO', '<=', searchEnd.toISOString());
     
-    const snapshot = await q.get();
+    const allSnapshot = await allQuery.get();
+    console.log("📋 TODOS os agendamentos encontrados na janela de tempo:");
+    allSnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        console.log(`  - ${data.NomeCliente} | ${data.DataHoraISO} | Status: ${data.Status}`);
+    });
     
-    for (const doc of snapshot.docs) {
+    // SEGUNDA BUSCA: Apenas agendamentos ATIVOS
+    const activeQuery = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', searchStart.toISOString())
+        .where('DataHoraISO', '<=', searchEnd.toISOString());
+    
+    const activeSnapshot = await activeQuery.get();
+    console.log("✅ Agendamentos ATIVOS encontrados:");
+    activeSnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        console.log(`  - ${data.NomeCliente} | ${data.DataHoraISO} | Status: ${data.Status}`);
+    });
+    
+    // Verificar conflitos apenas com agendamentos ativos
+    for (const doc of activeSnapshot.docs) {
         const existingData = doc.data();
         const existingStart = new Date(existingData.DataHoraISO).getTime();
         const existingEnd = existingStart + ((existingData.duracaoMinutos || 60) * 60 * 1000);
         
-        if (requestedStart < existingEnd && requestedEnd > existingStart) { 
-            return true; 
+        console.log("🔄 Comparando com agendamento ativo:");
+        console.log(`   Cliente: ${existingData.NomeCliente}`);
+        console.log(`   Início: ${dayjs(existingStart).tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm')}`);
+        console.log(`   Fim: ${dayjs(existingEnd).tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm')}`);
+        
+        if (requestedStart < existingEnd && requestedEnd > existingStart) {
+            console.log("❌ CONFLITO DETECTADO!");
+            return true;
+        } else {
+            console.log("✅ Sem conflito com este agendamento");
         }
     }
+    
+    console.log("🎉 Nenhum conflito encontrado!");
     return false;
 }
 
