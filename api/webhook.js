@@ -460,7 +460,10 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
     
     const schedulesRef = db.collection(CONFIG.collections.schedules);
+    
+    // CORREÇÃO: Filtrar apenas agendamentos ATIVOS na query
     const q = schedulesRef
+        .where('Status', '==', 'Agendado')  // Só buscar agendamentos ativos
         .where('DataHoraISO', '>=', searchStart.toISOString())
         .where('DataHoraISO', '<=', searchEnd.toISOString());
     
@@ -468,12 +471,6 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
     
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
-        
-        // MUDANÇA: Só considerar conflito se status for 'Agendado'
-        if (existingData.Status !== 'Agendado') {
-            continue;
-        }
-        
         const existingStart = new Date(existingData.DataHoraISO).getTime();
         const existingEnd = existingStart + ((existingData.duracaoMinutos || 60) * 60 * 1000);
         
@@ -485,16 +482,21 @@ async function checkConflicts(requestedDate, duracaoMinutos, db) {
 }
 
 async function saveAppointment(personInfo, requestedDate, servico, db) {
-    // NOVA LÓGICA: Verificar se existe agendamento cancelado no mesmo horário
     const schedulesRef = db.collection(CONFIG.collections.schedules);
-    const exactTimeQuery = schedulesRef.where('DataHoraISO', '==', requestedDate.toISOString());
+    
+    // CORREÇÃO: Buscar agendamentos cancelados no horário exato
+    const exactTimeQuery = schedulesRef
+        .where('DataHoraISO', '==', requestedDate.toISOString())
+        .where('Status', '==', 'Cancelado');  // Buscar apenas cancelados
+    
     const exactTimeSnapshot = await exactTimeQuery.get();
     
-    const canceledAppointment = exactTimeSnapshot.docs.find(doc => doc.data().Status === 'Cancelado');
-    
-    if (canceledAppointment) {
+    if (!exactTimeSnapshot.empty) {
+        // Pegar o primeiro agendamento cancelado encontrado
+        const canceledDoc = exactTimeSnapshot.docs[0];
+        
         // Atualizar o agendamento cancelado existente
-        await canceledAppointment.ref.update({
+        await canceledDoc.ref.update({
             NomeCliente: personInfo.name,
             TelefoneCliente: personInfo.phone,
             Status: 'Agendado',
@@ -502,8 +504,10 @@ async function saveAppointment(personInfo, requestedDate, servico, db) {
             servicoId: servico.id,
             servicoNome: servico.nome,
             duracaoMinutos: servico.duracaoMinutos,
-            // Manter a mesma DataHoraISO e DataHoraFormatada
+            // DataHoraISO e DataHoraFormatada permanecem os mesmos
         });
+        
+        console.log("✅ Agendamento cancelado reutilizado:", canceledDoc.id);
     } else {
         // Criar novo agendamento (lógica original)
         const newAppointment = {
@@ -518,6 +522,8 @@ async function saveAppointment(personInfo, requestedDate, servico, db) {
             duracaoMinutos: servico.duracaoMinutos,
         };
         await db.collection(CONFIG.collections.schedules).add(newAppointment);
+        
+        console.log("✅ Novo agendamento criado");
     }
 }
 
