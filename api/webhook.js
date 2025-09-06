@@ -379,9 +379,8 @@ async function findAvailableSlotsForDay(dayDate, duracaoMinutos, db) {
     
     const schedulesRef = db.collection(CONFIG.collections.schedules);
     const q = schedulesRef
-        .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', startOfDay.utc().toISOString())
-        .where('DataHoraISO', '<=', endOfDay.utc().toISOString());
+        .where('Status', '==', 'Agendado');
+        
     
     const snapshot = await q.get();
     
