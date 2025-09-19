@@ -96,7 +96,6 @@ app.post("/api/webhook", async (request, response) => {
             } else {
                 const dateForStorage = parsedDate.utc().toDate(); // Para salvar no DB em UTC
                 const personInfo = { name: nome, phone: telefone };
-                // CORREÇÃO FUSO HORÁRIO: Passamos o objeto dayjs (parsedDate) que sabe o fuso horário correto
                 resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoId);
             }
         } else if (intent === 'cancelarHorario') {
@@ -106,7 +105,12 @@ app.post("/api/webhook", async (request, response) => {
             resultPayload = { success: false, message: "Desculpe, não entendi o que você quis dizer. Para agendar, por favor, me diga o dia e a hora." };
         }
 
-        const responseData = { status: resultPayload.success ? 'success' : 'error', message: resultPayload.message };
+        // ALTERAÇÃO: Passamos o objeto completo, incluindo o 'type' se ele existir.
+        const responseData = { 
+            status: resultPayload.success ? 'success' : 'error', 
+            message: resultPayload.message,
+            type: resultPayload.type || null 
+        };
         console.log(`\n📤 RESPOSTA ENVIADA:\n`, JSON.stringify(responseData, null, 2));
         return response.status(200).json(responseData);
 
@@ -122,8 +126,22 @@ app.post("/api/webhook", async (request, response) => {
 
 async function handleScheduling(barbeariaId, personInfo, requestedDate, localTimeDayjs, servicoId) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
-    if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
     if (requestedDate.getTime() <= new Date().getTime()) return { success: false, message: "Não é possível agendar no passado." };
+
+    // Lógica para obter o serviço a partir do nome do cliente, se não for passado
+    if (!servicoId) {
+        // Esta é uma lógica placeholder. Você pode querer buscar o último serviço do cliente, etc.
+        // Por agora, vamos assumir um serviço padrão ou retornar um erro.
+        // Vamos buscar o primeiro serviço da lista como fallback.
+        const servicesCollection = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services);
+        const servicesSnapshot = await servicesCollection.limit(1).get();
+        if (!servicesSnapshot.empty) {
+            servicoId = servicesSnapshot.docs[0].id;
+        } else {
+            return { success: false, message: "Não encontrei serviços disponíveis. Por favor, mencione o serviço desejado (ex: 'corte e barba')." };
+        }
+    }
+
 
     const servicoRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
@@ -132,7 +150,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
     const duracao = parseInt(servico.duracaoMinutos, 10) || 30;
 
-    // CORREÇÃO FUSO HORÁRIO: Passamos o objeto dayjs para a função de verificação
     const businessHoursCheck = await checkBusinessHours(barbeariaId, localTimeDayjs, duracao);
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
 
@@ -140,7 +157,8 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     if (hasConflict) {
         console.log("⚠️ Conflito detectado, buscando horários alternativos...");
         const suggestions = await getAvailableSlots(barbeariaId, requestedDate, duracao);
-        return { success: false, message: suggestions };
+        // ALTERAÇÃO IMPORTANTE: Retornamos o type 'suggestion'
+        return { success: false, type: 'suggestion', message: suggestions };
     }
 
     await saveAppointment(barbeariaId, personInfo, requestedDate, servico);
@@ -149,8 +167,8 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
+// ... O restante do seu ficheiro (checkBusinessHours, getAvailableSlots, etc.) permanece o mesmo ...
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
-    // CORREÇÃO FUSO HORÁRIO: Usamos .day() do dayjs (Domingo=0, Sábado=6), que é compatível com Date.getDay()
     const dayOfWeek = dateDayjs.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
@@ -163,7 +181,6 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
         return (h * 60) + (m || 0);
     };
     
-    // CORREÇÃO FUSO HORÁRIO: Usamos .hour() e .minute() do dayjs para obter a hora local correta, não a do servidor.
     const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
 
