@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK MULTI-TENANT COM IA GEMINI - VERSÃO FINAL CORRIGIDA
+// WEBHOOK MULTI-TENANT COM IA GEMINI - VERSÃO COM VALIDAÇÃO DE SERVIÇOS
 // =================================================================
 const express = require("express");
 const admin = require('firebase-admin');
@@ -28,31 +28,35 @@ const CONFIG = {
     }
 };
 
-// Inicializa o Firebase Admin SDK
 if (!admin.apps.length) {
     admin.initializeApp({ credential: admin.credential.cert(CONFIG.firebaseCreds) });
 }
 const db = admin.firestore();
-
-// Inicializa o Google Gemini AI SDK
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // --- FUNÇÃO COM IA PARA INTERPRETAR O TEXTO ---
-async function getIntentAndDateFromGemini(text) {
+async function getIntentAndDateFromGemini(text, servicesList) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const serviceNames = servicesList.map(s => s.nome).join(', ');
 
         const systemPrompt = `
         Você é um assistente especialista em agendamentos para barbearias. Sua única tarefa é analisar a mensagem do usuário e extrair informações, retornando-as estritamente no formato JSON.
+        A lista de serviços disponíveis é: [${serviceNames}].
+
         O JSON de saída deve ter a seguinte estrutura:
-        { "intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null }
+        { 
+          "intent": "agendarHorario" | "cancelarHorario" | "informacao", 
+          "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null,
+          "servicoNome": "Nome do Serviço" | null
+        }
+
         Regras:
         - Analise o texto para determinar a intenção principal.
-        - Se a intenção for 'agendarHorario', 'dataHoraISO' é obrigatório. Converta qualquer data/hora relativa (como 'amanhã às 15h', 'sexta que vem 10:30') para o formato ISO 8601 completo, usando o fuso horário '${CONFIG.timezone}'.
-        - A data e hora de referência para o cálculo é: ${new Date().toISOString()}.
-        - Se a intenção for 'cancelarHorario', 'dataHoraISO' pode ser nulo.
-        - Se não for possível determinar uma data clara para o agendamento, retorne o 'intent' como 'informacao' e 'dataHoraISO' como nulo.
-        - Responda APENAS com o objeto JSON, sem nenhum texto ou explicação adicional.`;
+        - Se a intenção for 'agendarHorario', 'dataHoraISO' é obrigatório. Converta qualquer data/hora relativa para o formato ISO 8601 completo, usando o fuso horário '${CONFIG.timezone}'. A data de referência é: ${new Date().toISOString()}.
+        - Identifique o nome do serviço que o usuário mencionou da lista fornecida. Se ele mencionar um serviço que não está na lista, ou se nenhum serviço for mencionado, retorne "servicoNome" como nulo.
+        - Se a intenção for 'cancelarHorario', os outros campos podem ser nulos.
+        - Responda APENAS com o objeto JSON.`;
         
         const prompt = `${systemPrompt}\n\nMensagem do Usuário: "${text}"`;
         const result = await model.generateContent(prompt);
@@ -73,30 +77,45 @@ app.post("/api/webhook", async (request, response) => {
     console.log("\n🔄 === NOVO REQUEST WEBHOOK (Express) ===\n", JSON.stringify(body, null, 2));
 
     try {
-        const { nome, telefone, data_hora_texto, servicoId, barbeariaId } = body;
+        const { nome, telefone, data_hora_texto, barbeariaId } = body;
         let resultPayload;
 
         if (!barbeariaId) {
-            console.error("❌ Erro: barbeariaId não fornecido no request.");
             return response.status(400).json({ status: 'error', message: "ID da barbearia não foi fornecido." });
         }
         
-        const aiResult = await getIntentAndDateFromGemini(data_hora_texto);
+        const servicesSnapshot = await db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services).get();
+        const servicesList = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // **NOVA VALIDAÇÃO:** Verifica se existem serviços antes de continuar.
+        if (servicesList.length === 0) {
+            const errorResponse = { 
+                status: 'error', 
+                message: 'Ainda não há serviços configurados para esta barbearia. Por favor, configure os serviços no seu painel de gestão antes de usar o chatbot.' 
+            };
+            console.log(`\n📤 RESPOSTA ENVIADA:\n`, JSON.stringify(errorResponse, null, 2));
+            return response.status(200).json(errorResponse);
+        }
+
+        const aiResult = await getIntentAndDateFromGemini(data_hora_texto, servicesList);
 
         if (!aiResult) {
             return response.status(500).json({ status: 'error', message: "Desculpe, não consegui processar sua solicitação com a IA." });
         }
 
-        const intent = aiResult.intent;
-        const parsedDate = aiResult.dataHoraISO ? dayjs(aiResult.dataHoraISO).tz(CONFIG.timezone) : null;
+        const { intent, dataHoraISO, servicoNome } = aiResult;
+        const parsedDate = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
+        const servicoEncontrado = servicoNome ? servicesList.find(s => s.nome.toLowerCase() === servicoNome.toLowerCase()) : null;
 
         if (intent === 'agendarHorario') {
             if (!parsedDate) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'sexta-feira 10:30'." };
+                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h'." };
+            } else if (!servicoEncontrado) {
+                 resultPayload = { success: false, message: `Não consegui identificar o serviço que você pediu. Nossos serviços são: ${servicesList.map(s => s.nome).join(', ')}. Por favor, tente novamente.` };
             } else {
-                const dateForStorage = parsedDate.utc().toDate(); // Para salvar no DB em UTC
+                const dateForStorage = parsedDate.utc().toDate();
                 const personInfo = { name: nome, phone: telefone };
-                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoId);
+                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoEncontrado.id);
             }
         } else if (intent === 'cancelarHorario') {
             const personInfo = { phone: telefone };
@@ -105,7 +124,6 @@ app.post("/api/webhook", async (request, response) => {
             resultPayload = { success: false, message: "Desculpe, não entendi o que você quis dizer. Para agendar, por favor, me diga o dia e a hora." };
         }
 
-        // ALTERAÇÃO: Passamos o objeto completo, incluindo o 'type' se ele existir.
         const responseData = { 
             status: resultPayload.success ? 'success' : 'error', 
             message: resultPayload.message,
@@ -120,28 +138,11 @@ app.post("/api/webhook", async (request, response) => {
     }
 });
 
-// =================================================================
-// FUNÇÕES DE LÓGICA DE NEGÓCIO
-// =================================================================
-
+// ... O restante do seu ficheiro (handleScheduling, checkBusinessHours, etc.) permanece o mesmo ...
 async function handleScheduling(barbeariaId, personInfo, requestedDate, localTimeDayjs, servicoId) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
+    if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
     if (requestedDate.getTime() <= new Date().getTime()) return { success: false, message: "Não é possível agendar no passado." };
-
-    // Lógica para obter o serviço a partir do nome do cliente, se não for passado
-    if (!servicoId) {
-        // Esta é uma lógica placeholder. Você pode querer buscar o último serviço do cliente, etc.
-        // Por agora, vamos assumir um serviço padrão ou retornar um erro.
-        // Vamos buscar o primeiro serviço da lista como fallback.
-        const servicesCollection = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services);
-        const servicesSnapshot = await servicesCollection.limit(1).get();
-        if (!servicesSnapshot.empty) {
-            servicoId = servicesSnapshot.docs[0].id;
-        } else {
-            return { success: false, message: "Não encontrei serviços disponíveis. Por favor, mencione o serviço desejado (ex: 'corte e barba')." };
-        }
-    }
-
 
     const servicoRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
@@ -157,7 +158,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     if (hasConflict) {
         console.log("⚠️ Conflito detectado, buscando horários alternativos...");
         const suggestions = await getAvailableSlots(barbeariaId, requestedDate, duracao);
-        // ALTERAÇÃO IMPORTANTE: Retornamos o type 'suggestion'
         return { success: false, type: 'suggestion', message: suggestions };
     }
 
@@ -167,7 +167,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
-// ... O restante do seu ficheiro (checkBusinessHours, getAvailableSlots, etc.) permanece o mesmo ...
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const dayOfWeek = dateDayjs.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
@@ -355,6 +354,5 @@ async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) 
     await schedulesRef.add(newAppointment);
 }
 
-// Exporta o app para a Vercel conseguir usá-lo como uma Serverless Function
 module.exports = app;
 
