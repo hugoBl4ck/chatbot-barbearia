@@ -131,7 +131,7 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     if (!servicoSnap.exists) return { success: false, message: "O serviço selecionado não foi encontrado para esta barbearia." };
     
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
-    const duracao = servico.duracaoMinutos || 30;
+    const duracao = parseInt(servico.duracaoMinutos, 10) || 30;
 
     const businessHoursCheck = await checkBusinessHours(barbeariaId, localTime, duracao);
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
