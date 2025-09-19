@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK MULTI-TENANT COM IA GEMINI - VERSÃO PARA SERVIDOR EXPRESS
+// WEBHOOK MULTI-TENANT COM IA GEMINI - VERSÃO FINAL CORRIGIDA
 // =================================================================
 const express = require("express");
 const admin = require('firebase-admin');
@@ -18,7 +18,6 @@ const app = express();
 app.use(express.json());
 
 const CONFIG = {
-    // As credenciais agora vêm das variáveis de ambiente da Vercel
     firebaseCreds: JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'),
     timezone: 'America/Sao_Paulo',
     collections: {
@@ -58,6 +57,7 @@ async function getIntentAndDateFromGemini(text) {
         const prompt = `${systemPrompt}\n\nMensagem do Usuário: "${text}"`;
         const result = await model.generateContent(prompt);
         const responseText = await result.response.text();
+        console.log("📝 Resposta bruta da IA:", responseText);
         const cleanedJsonString = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
         return JSON.parse(cleanedJsonString);
 
@@ -88,16 +88,16 @@ app.post("/api/webhook", async (request, response) => {
         }
 
         const intent = aiResult.intent;
-        const parsedDate = aiResult.dataHoraISO ? dayjs(aiResult.dataHoraISO) : null;
+        const parsedDate = aiResult.dataHoraISO ? dayjs(aiResult.dataHoraISO).tz(CONFIG.timezone) : null;
 
         if (intent === 'agendarHorario') {
             if (!parsedDate) {
                 resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'sexta-feira 10:30'." };
             } else {
-                const dateForStorage = parsedDate.utc().toDate();
-                const dateForValidation = parsedDate.toDate();
+                const dateForStorage = parsedDate.utc().toDate(); // Para salvar no DB em UTC
                 const personInfo = { name: nome, phone: telefone };
-                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, dateForValidation, servicoId);
+                // CORREÇÃO FUSO HORÁRIO: Passamos o objeto dayjs (parsedDate) que sabe o fuso horário correto
+                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoId);
             }
         } else if (intent === 'cancelarHorario') {
             const personInfo = { phone: telefone };
@@ -116,24 +116,24 @@ app.post("/api/webhook", async (request, response) => {
     }
 });
 
-
 // =================================================================
-// AS FUNÇÕES DE LÓGICA DE NEGÓCIO ABAIXO PERMANECEM AS MESMAS
+// FUNÇÕES DE LÓGICA DE NEGÓCIO
 // =================================================================
 
-async function handleScheduling(barbeariaId, personInfo, requestedDate, localTime, servicoId) {
+async function handleScheduling(barbeariaId, personInfo, requestedDate, localTimeDayjs, servicoId) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
     if (requestedDate.getTime() <= new Date().getTime()) return { success: false, message: "Não é possível agendar no passado." };
 
     const servicoRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
-    if (!servicoSnap.exists) return { success: false, message: "O serviço selecionado não foi encontrado para esta barbearia." };
+    if (!servicoSnap.exists) return { success: false, message: "O serviço selecionado não foi encontrado." };
     
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
     const duracao = parseInt(servico.duracaoMinutos, 10) || 30;
 
-    const businessHoursCheck = await checkBusinessHours(barbeariaId, localTime, duracao);
+    // CORREÇÃO FUSO HORÁRIO: Passamos o objeto dayjs para a função de verificação
+    const businessHoursCheck = await checkBusinessHours(barbeariaId, localTimeDayjs, duracao);
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
 
     const hasConflict = await checkConflicts(barbeariaId, requestedDate, duracao);
@@ -149,8 +149,9 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
-async function checkBusinessHours(barbeariaId, date, duracaoMinutos) {
-    const dayOfWeek = date.getDay();
+async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
+    // CORREÇÃO FUSO HORÁRIO: Usamos .day() do dayjs (Domingo=0, Sábado=6), que é compatível com Date.getDay()
+    const dayOfWeek = dateDayjs.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
     if (!docSnap.exists || !docSnap.data().aberto) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
@@ -162,7 +163,8 @@ async function checkBusinessHours(barbeariaId, date, duracaoMinutos) {
         return (h * 60) + (m || 0);
     };
     
-    const requestedStartMinutes = date.getHours() * 60 + date.getMinutes();
+    // CORREÇÃO FUSO HORÁRIO: Usamos .hour() e .minute() do dayjs para obter a hora local correta, não a do servidor.
+    const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
 
     const morningStart = timeToMinutes(dayConfig.InicioManha);
@@ -338,3 +340,4 @@ async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) 
 
 // Exporta o app para a Vercel conseguir usá-lo como uma Serverless Function
 module.exports = app;
+
