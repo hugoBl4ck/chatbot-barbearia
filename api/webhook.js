@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK MULTI-TENANT COM IA GEMINI - VERSÃO FINAL CORRIGIDA
+// WEBHOOK MULTI-TENANT COM IA PERPLEXITY - VERSÃO 3.0
 // =================================================================
 const express = require("express");
 const admin = require('firebase-admin');
@@ -7,7 +7,8 @@ const dayjs = require('dayjs');
 const timezone = require('dayjs/plugin/timezone');
 const utc = require('dayjs/plugin/utc');
 require('dayjs/locale/pt-br');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// Usaremos o 'fetch' que já é nativo nas versões mais recentes do Node.js
+// Se tiver problemas no deploy, pode ser necessário instalar 'node-fetch'
 
 // --- CONFIGURAÇÃO ---
 dayjs.extend(utc);
@@ -19,6 +20,7 @@ app.use(express.json());
 
 const CONFIG = {
     firebaseCreds: JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'),
+    perplexityApiKey: process.env.PERPLEXITY_API_KEY, // Nova chave de API
     timezone: 'America/Sao_Paulo',
     collections: {
         barbearias: 'barbearias',
@@ -34,79 +36,108 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// Inicializa o Google Gemini AI SDK
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// --- NOVA FUNÇÃO COM IA PERPLEXITY ---
+async function getIntentAndDateFromPerplexity(text, servicesList) {
+    if (!CONFIG.perplexityApiKey) {
+        console.error("❌ Chave da API do Perplexity não configurada.");
+        return null;
+    }
 
-// --- FUNÇÃO COM IA PARA INTERPRETAR O TEXTO ---
-async function getIntentAndDateFromGemini(text) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const serviceNames = servicesList.map(s => s.nome).join(', ');
 
-        const systemPrompt = `
-        Você é um assistente especialista em agendamentos para barbearias. Sua única tarefa é analisar a mensagem do usuário e extrair informações, retornando-as estritamente no formato JSON.
-        O JSON de saída deve ter a seguinte estrutura:
-        { "intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null }
-        Regras:
-        - Analise o texto para determinar a intenção principal.
-        - Se a intenção for 'agendarHorario', 'dataHoraISO' é obrigatório. Converta qualquer data/hora relativa (como 'amanhã às 15h', 'sexta que vem 10:30') para o formato ISO 8601 completo, usando o fuso horário '${CONFIG.timezone}'.
-        - A data e hora de referência para o cálculo é: ${new Date().toISOString()}.
-        - Se a intenção for 'cancelarHorario', 'dataHoraISO' pode ser nulo.
-        - Se não for possível determinar uma data clara para o agendamento, retorne o 'intent' como 'informacao' e 'dataHoraISO' como nulo.
-        - Responda APENAS com o objeto JSON, sem nenhum texto ou explicação adicional.`;
+        const systemPrompt = `Você é um assistente de agendamento para barbearias. Sua tarefa é analisar a mensagem do usuário e extrair informações, retornando APENAS um objeto JSON. A lista de serviços válidos é: [${serviceNames}]. A data de referência é ${new Date().toISOString()} no fuso horário ${CONFIG.timezone}. O JSON de saída deve ter a seguinte estrutura: { "intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null, "servicoNome": "Nome do Serviço" | null }. Se um serviço não for mencionado ou não estiver na lista, retorne "servicoNome" como nulo.`;
         
-        const prompt = `${systemPrompt}\n\nMensagem do Usuário: "${text}"`;
-        const result = await model.generateContent(prompt);
-        const responseText = await result.response.text();
-        console.log("📝 Resposta bruta da IA:", responseText);
+        const response = await fetch("https://api.perplexity.ai/chat/completions", {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${CONFIG.perplexityApiKey}`
+            },
+            body: JSON.stringify({
+                model: 'llama-3-sonar-small-32k-online', // Um modelo rápido e poderoso da Perplexity
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: text }
+                ],
+                max_tokens: 300,
+                temperature: 0.1 // Queremos respostas precisas e consistentes
+            })
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+            console.error(`❌ Erro da API Perplexity: ${response.status} ${response.statusText}`, errorBody);
+            return null;
+        }
+
+        const data = await response.json();
+        const responseText = data.choices[0].message.content;
+
+        console.log("📝 Resposta bruta da IA (Perplexity):", responseText);
         const cleanedJsonString = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
         return JSON.parse(cleanedJsonString);
 
     } catch (error) {
-        console.error("❌ Erro ao chamar a API Gemini:", error);
+        console.error("❌ Erro ao chamar a API Perplexity:", error);
         return null;
     }
 }
 
-// --- ROTA PRINCIPAL DO WEBHOOK ---
+// --- ROTA PRINCIPAL DO WEBHOOK (Lógica de chamada ajustada) ---
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
-    console.log("\n🔄 === NOVO REQUEST WEBHOOK (Express) ===\n", JSON.stringify(body, null, 2));
+    console.log("\n🔄 === NOVO REQUEST WEBHOOK (Perplexity) ===\n", JSON.stringify(body, null, 2));
 
     try {
-        const { nome, telefone, data_hora_texto, servicoId, barbeariaId } = body;
+        const { nome, telefone, data_hora_texto, barbeariaId } = body;
         let resultPayload;
 
         if (!barbeariaId) {
-            console.error("❌ Erro: barbeariaId não fornecido no request.");
             return response.status(400).json({ status: 'error', message: "ID da barbearia não foi fornecido." });
         }
         
-        const aiResult = await getIntentAndDateFromGemini(data_hora_texto);
+        const servicesSnapshot = await db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services).get();
+        const servicesList = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        if (servicesList.length === 0) {
+            const errorResponse = { status: 'error', message: 'Ainda não há serviços configurados para esta barbearia.' };
+            console.log(`\n📤 RESPOSTA ENVIADA:\n`, JSON.stringify(errorResponse, null, 2));
+            return response.status(200).json(errorResponse);
+        }
+
+        const aiResult = await getIntentAndDateFromPerplexity(data_hora_texto, servicesList);
 
         if (!aiResult) {
             return response.status(500).json({ status: 'error', message: "Desculpe, não consegui processar sua solicitação com a IA." });
         }
-
-        const intent = aiResult.intent;
-        const parsedDate = aiResult.dataHoraISO ? dayjs(aiResult.dataHoraISO).tz(CONFIG.timezone) : null;
+        
+        const { intent, dataHoraISO, servicoNome } = aiResult;
+        const parsedDate = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
+        const servicoEncontrado = servicoNome ? servicesList.find(s => s.nome.toLowerCase() === servicoNome.toLowerCase()) : null;
 
         if (intent === 'agendarHorario') {
             if (!parsedDate) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'sexta-feira 10:30'." };
+                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h'." };
+            } else if (!servicoEncontrado) {
+                 resultPayload = { success: false, message: `Não consegui identificar o serviço que você pediu. Nossos serviços são: ${servicesList.map(s => s.nome).join(', ')}. Por favor, tente novamente.` };
             } else {
-                const dateForStorage = parsedDate.utc().toDate(); // Para salvar no DB em UTC
+                const dateForStorage = parsedDate.utc().toDate();
                 const personInfo = { name: nome, phone: telefone };
-                // CORREÇÃO FUSO HORÁRIO: Passamos o objeto dayjs (parsedDate) que sabe o fuso horário correto
-                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoId);
+                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoEncontrado.id);
             }
         } else if (intent === 'cancelarHorario') {
             const personInfo = { phone: telefone };
             resultPayload = await handleCancellation(barbeariaId, personInfo);
         } else {
-            resultPayload = { success: false, message: "Desculpe, não entendi o que você quis dizer. Para agendar, por favor, me diga o dia e a hora." };
+            resultPayload = { success: false, message: "Desculpe, não entendi o que você quis dizer." };
         }
-
-        const responseData = { status: resultPayload.success ? 'success' : 'error', message: resultPayload.message };
+        
+        const responseData = { 
+            status: resultPayload.success ? 'success' : 'error', 
+            message: resultPayload.message,
+            type: resultPayload.type || null 
+        };
         console.log(`\n📤 RESPOSTA ENVIADA:\n`, JSON.stringify(responseData, null, 2));
         return response.status(200).json(responseData);
 
@@ -116,10 +147,8 @@ app.post("/api/webhook", async (request, response) => {
     }
 });
 
-// =================================================================
-// FUNÇÕES DE LÓGICA DE NEGÓCIO
-// =================================================================
 
+// ... O restante do seu ficheiro (handleScheduling, checkBusinessHours, etc.) permanece exatamente o mesmo ...
 async function handleScheduling(barbeariaId, personInfo, requestedDate, localTimeDayjs, servicoId) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: "Faltam seus dados pessoais." };
     if (!servicoId) return { success: false, message: "Você precisa selecionar um serviço." };
@@ -132,7 +161,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     const servico = { id: servicoSnap.id, ...servicoSnap.data() };
     const duracao = parseInt(servico.duracaoMinutos, 10) || 30;
 
-    // CORREÇÃO FUSO HORÁRIO: Passamos o objeto dayjs para a função de verificação
     const businessHoursCheck = await checkBusinessHours(barbeariaId, localTimeDayjs, duracao);
     if (!businessHoursCheck.isOpen) return { success: false, message: businessHoursCheck.message };
 
@@ -140,7 +168,7 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
     if (hasConflict) {
         console.log("⚠️ Conflito detectado, buscando horários alternativos...");
         const suggestions = await getAvailableSlots(barbeariaId, requestedDate, duracao);
-        return { success: false, message: suggestions };
+        return { success: false, type: 'suggestion', message: suggestions };
     }
 
     await saveAppointment(barbeariaId, personInfo, requestedDate, servico);
@@ -150,7 +178,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
 }
 
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
-    // CORREÇÃO FUSO HORÁRIO: Usamos .day() do dayjs (Domingo=0, Sábado=6), que é compatível com Date.getDay()
     const dayOfWeek = dateDayjs.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
@@ -163,7 +190,6 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
         return (h * 60) + (m || 0);
     };
     
-    // CORREÇÃO FUSO HORÁRIO: Usamos .hour() e .minute() do dayjs para obter a hora local correta, não a do servidor.
     const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
 
@@ -338,6 +364,5 @@ async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) 
     await schedulesRef.add(newAppointment);
 }
 
-// Exporta o app para a Vercel conseguir usá-lo como uma Serverless Function
 module.exports = app;
 
