@@ -37,7 +37,8 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 // --- FUNÇÃO COM IA PARA INTERPRETAR O TEXTO ---
 async function getIntentAndDateFromGemini(text, servicesList) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        // ALTERAÇÃO: Trocamos o modelo 'flash' pelo 'pro' para mais potência.
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" });
         const serviceNames = servicesList.map(s => s.nome).join(', ');
 
         const systemPrompt = `
