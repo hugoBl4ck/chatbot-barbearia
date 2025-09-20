@@ -55,7 +55,7 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
                 'Authorization': `Bearer ${CONFIG.perplexityApiKey}`
             },
             body: JSON.stringify({
-                model: 'llama-3-sonar-small-32k-chat', // Um modelo rápido e poderoso da Perplexity
+                model: 'sonar', // Modelo Perplexity
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: text }
