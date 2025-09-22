@@ -73,7 +73,7 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
                 'Authorization': `Bearer ${CONFIG.perplexityApiKey}`
             },
             body: JSON.stringify({
-                model: 'sonar-pro', // Modelo Perplexity
+                model: 'sonar-pro', // Modelo correto da API Perplexity
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: text }
@@ -323,6 +323,159 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     }
 }
 
-// Demais funções permanecem iguais (getAvailableSlots, findAvailableSlotsForDay, handleCancellation, checkConflicts, saveAppointment)
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
+    try {
+        const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
+        let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = requestedDateDayjs.format('DD/MM');
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `Este horário já está ocupado. Que tal um destes para ${dateStr}? ${slotsText}`;
+        }
+        
+        const tomorrow = requestedDateDayjs.add(1, 'day');
+        availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = tomorrow.format('DD/MM');
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `Este horário já está ocupado e não há mais vagas hoje. Que tal para ${dateStr}? Horários: ${slotsText}`;
+        }
+        
+        return "Este horário já está ocupado. Infelizmente não encontrei horários disponíveis para hoje nem amanhã. Tente outro dia.";
+    } catch (error) {
+        console.error("Erro ao buscar horários disponíveis:", error);
+        return "Este horário já está ocupado. Tente outro horário.";
+    }
+}
+
+async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
+    const dayOfWeek = dayDate.day();
+    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
+    const docSnap = await docRef.get();
+    if (!docSnap.exists || !docSnap.data().aberto) return [];
+    
+    const dayConfig = docSnap.data();
+    const timeToMinutes = (str) => {
+        if (!str) return null;
+        const [h, m] = str.split(':').map(Number);
+        return (h * 60) + (m || 0);
+    };
+
+    const morningStart = timeToMinutes(dayConfig.InicioManha);
+    const morningEnd = timeToMinutes(dayConfig.FimManha);
+    const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
+    const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
+    
+    const startOfDay = dayDate.startOf('day').toDate();
+    const endOfDay = dayDate.endOf('day').toDate();
+    
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', startOfDay.toISOString())
+        .where('DataHoraISO', '<=', endOfDay.toISOString());
+        
+    const snapshot = await q.get();
+    const busySlots = [];
+    snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
+        const serviceDuration = data.duracaoMinutos || 30;
+        const endTime = startTime.add(serviceDuration, 'minutes');
+        busySlots.push({
+            start: startTime.hour() * 60 + startTime.minute(),
+            end: endTime.hour() * 60 + endTime.minute()
+        });
+    });
+    
+    const availableSlots = [];
+    const currentTime = dayjs().tz(CONFIG.timezone);
+    const isToday = dayDate.isSame(currentTime, 'day');
+    
+    const addSlotsFromPeriod = (startMinutes, endMinutes) => {
+        if (startMinutes === null || endMinutes === null) return;
+        for (let time = startMinutes; time + duracaoMinutos <= endMinutes; time += 30) {
+            const slotDate = dayDate.hour(Math.floor(time / 60)).minute(time % 60);
+            if (isToday && slotDate.isBefore(currentTime.add(1, 'hour'))) {
+                continue;
+            }
+            const hasConflict = busySlots.some(busy => (time < busy.end && (time + duracaoMinutos) > busy.start));
+            if (!hasConflict) {
+                availableSlots.push(slotDate.format('HH:mm'));
+            }
+        }
+    };
+    
+    addSlotsFromPeriod(morningStart, morningEnd);
+    addSlotsFromPeriod(afternoonStart, afternoonEnd);
+    
+    return availableSlots;
+}
+
+async function handleCancellation(barbeariaId, personInfo) {
+    if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('TelefoneCliente', '==', personInfo.phone)
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>', new Date().toISOString());
+    const snapshot = await q.get();
+    if (snapshot.empty) return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone.` };
+    
+    let count = 0;
+    for (const doc of snapshot.docs) {
+        await doc.ref.update({ Status: 'Cancelado' });
+        count++;
+    }
+    return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.` };
+}
+
+async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
+    const serviceDurationMs = duracaoMinutos * 60 * 1000;
+    const requestedStart = requestedDate.getTime();
+    const requestedEnd = requestedStart + serviceDurationMs;
+    
+    const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
+    const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
+    
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', searchStart.toISOString())
+        .where('DataHoraISO', '<=', searchEnd.toISOString());
+    
+    const snapshot = await q.get();
+    
+    for (const doc of snapshot.docs) {
+        const existingData = doc.data();
+        if (existingData.Status !== 'Agendado') {
+            continue;
+        }
+        const existingStart = new Date(existingData.DataHoraISO).getTime();
+        const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
+        if (requestedStart < existingEnd && requestedEnd > existingStart) {
+            return true;
+        }
+    }
+    return false;
+}
+
+async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) {
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const newAppointment = {
+        NomeCliente: personInfo.name,
+        TelefoneCliente: personInfo.phone,
+        DataHoraISO: requestedDate.toISOString(),
+        Status: 'Agendado',
+        TimestampAgendamento: new Date().toISOString(),
+        servicoId: servico.id,
+        servicoNome: servico.nome,
+        preco: servico.preco,
+        duracaoMinutos: servico.duracaoMinutos || 30,
+    };
+    await schedulesRef.add(newAppointment);
+}
 
 module.exports = app;
