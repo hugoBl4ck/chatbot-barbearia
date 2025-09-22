@@ -73,7 +73,7 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
                 'Authorization': `Bearer ${CONFIG.perplexityApiKey}`
             },
             body: JSON.stringify({
-                model: 'llama-3.1-sonar-small-128k-online', // Modelo mais atual
+                model: 'sonar-pro', // Modelo Perplexity
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: text }
