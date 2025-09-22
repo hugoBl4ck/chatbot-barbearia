@@ -47,8 +47,8 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
         const serviceNames = servicesList.map(s => s.nome).join(', ');
         const currentDateTime = dayjs().tz(CONFIG.timezone);
         
-        const systemPrompt = `Você é um assistente de agendamento para barbearias. 
-        Data/hora atual: ${currentDateTime.format('YYYY-MM-DD HH:mm')} (${CONFIG.timezone})
+        const systemPrompt = `Você é um assistente de agendamento para barbearias no Brasil. 
+        Data/hora atual: ${currentDateTime.format('YYYY-MM-DD HH:mm')} (timezone: ${CONFIG.timezone})
         Lista de serviços válidos: [${serviceNames}]
         
         Analise a mensagem do usuário e retorne APENAS um objeto JSON válido:
@@ -59,12 +59,18 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
             "confianca": 0.0 a 1.0
         }
         
-        REGRAS IMPORTANTES:
-        - Para "hoje", use a data atual: ${currentDateTime.format('YYYY-MM-DD')}
-        - Para "amanhã", use: ${currentDateTime.add(1, 'day').format('YYYY-MM-DD')}
-        - Sempre retorne dataHoraISO no formato ISO com timezone UTC
+        REGRAS CRÍTICAS PARA HORÁRIOS:
+        - Estamos no fuso horário ${CONFIG.timezone} (GMT-3)
+        - Para "hoje às 16h": use ${currentDateTime.format('YYYY-MM-DD')}T16:00:00.000Z mas ajuste para UTC (-3h = 19:00 UTC)
+        - Para "amanhã às 14h": use ${currentDateTime.add(1, 'day').format('YYYY-MM-DD')}T14:00:00.000Z mas ajuste para UTC (-3h = 17:00 UTC)
+        - SEMPRE converta o horário local brasileiro para UTC adicionando 3 horas
+        - Exemplo: 16:00 Brasil = 19:00 UTC
         - Se não conseguir identificar data/hora, retorne null
-        - Se serviço não estiver na lista, retorne null para servicoNome`;
+        - Se serviço não estiver na lista, retorne null para servicoNome
+        
+        EXEMPLOS DE CONVERSÃO:
+        - "hoje às 16h" → "${currentDateTime.format('YYYY-MM-DD')}T19:00:00.000Z"
+        - "amanhã às 14h" → "${currentDateTime.add(1, 'day').format('YYYY-MM-DD')}T17:00:00.000Z"`;
         
         const response = await fetch("https://api.perplexity.ai/chat/completions", {
             method: 'POST',
@@ -159,10 +165,17 @@ app.post("/api/webhook", async (request, response) => {
         const { intent, dataHoraISO, servicoNome, confianca } = aiResult;
         console.log("🤖 Resultado da IA:", { intent, dataHoraISO, servicoNome, confianca });
         
-        // Melhor tratamento de data
+        // Melhor tratamento de data com conversão de timezone
         let parsedDate = null;
         if (dataHoraISO) {
-            parsedDate = dayjs(dataHoraISO).tz(CONFIG.timezone);
+            // A IA deve retornar em UTC, convertemos para timezone local
+            parsedDate = dayjs.utc(dataHoraISO).tz(CONFIG.timezone);
+            
+            console.log("🕐 Conversão de timezone:");
+            console.log("  Data recebida (UTC):", dataHoraISO);
+            console.log("  Data convertida (local):", parsedDate.format('YYYY-MM-DD HH:mm:ss'));
+            console.log("  É válida?", parsedDate.isValid());
+            
             if (!parsedDate.isValid()) {
                 console.error("❌ Data inválida:", dataHoraISO);
                 parsedDate = null;
@@ -227,21 +240,31 @@ async function handleScheduling(barbeariaId, personInfo, requestedDate, localTim
         return { success: false, message: "Você precisa selecionar um serviço." };
     }
     
-    // CORREÇÃO PRINCIPAL: Comparar com horário local atual
+    // CORREÇÃO PRINCIPAL: Comparar com horário local atual com mais tolerância
     const now = dayjs().tz(CONFIG.timezone);
     const requestedDateTime = localTimeDayjs;
     
-    console.log("🕐 Comparação de tempo:");
+    console.log("🕐 Comparação de tempo detalhada:");
     console.log("  Agora (local):", now.format('YYYY-MM-DD HH:mm:ss'));
     console.log("  Solicitado (local):", requestedDateTime.format('YYYY-MM-DD HH:mm:ss'));
+    console.log("  Diferença em minutos:", requestedDateTime.diff(now, 'minutes'));
     console.log("  É no passado?", requestedDateTime.isBefore(now));
     
-    // Permitir agendamento até 30 minutos no passado para compensar delays
-    if (requestedDateTime.isBefore(now.subtract(30, 'minutes'))) {
-        return { 
-            success: false, 
-            message: `Não é possível agendar para ${requestedDateTime.format('DD/MM às HH:mm')}. Este horário já passou. Tente um horário futuro.` 
-        };
+    // Permitir agendamento até 15 minutos no passado para compensar delays de processamento
+    const marginMinutes = 15;
+    if (requestedDateTime.isBefore(now.subtract(marginMinutes, 'minutes'))) {
+        const hoursDiff = now.diff(requestedDateTime, 'hours');
+        if (hoursDiff > 12) {
+            return { 
+                success: false, 
+                message: `Não é possível agendar para ${requestedDateTime.format('DD/MM/YYYY às HH:mm')}. Esta data já passou. Tente um horário futuro.` 
+            };
+        } else {
+            return { 
+                success: false, 
+                message: `O horário ${requestedDateTime.format('HH:mm')} já passou. Que tal agendar para mais tarde ou amanhã?` 
+            };
+        }
     }
 
     const servicoRef = db.collection(CONFIG.collections.barbearias)
