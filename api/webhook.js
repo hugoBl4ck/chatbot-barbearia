@@ -394,24 +394,40 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const startOfDay = dayDate.startOf('day').toDate();
     const endOfDay = dayDate.endOf('day').toDate();
     
-    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
-    const q = schedulesRef
-        .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', startOfDay.toISOString())
-        .where('DataHoraISO', '<=', endOfDay.toISOString());
+    const schedulesRef = db.collection(CONFIG.collections.barbearias)
+        .doc(barbeariaId)
+        .collection(CONFIG.collections.schedules);
+    
+    try {
+        // Consulta simples por data (sem filtro de Status para evitar índice composto)
+        const q = schedulesRef
+            .where('DataHoraISO', '>=', startOfDay.toISOString())
+            .where('DataHoraISO', '<=', endOfDay.toISOString());
+            
+        const snapshot = await q.get();
+        const busySlots = [];
         
-    const snapshot = await q.get();
-    const busySlots = [];
-    snapshot.docs.forEach(doc => {
-        const data = doc.data();
-        const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
-        const serviceDuration = data.duracaoMinutos || 30;
-        const endTime = startTime.add(serviceDuration, 'minutes');
-        busySlots.push({
-            start: startTime.hour() * 60 + startTime.minute(),
-            end: endTime.hour() * 60 + endTime.minute()
+        // Filtrar por Status no código
+        snapshot.docs.forEach(doc => {
+            const data = doc.data();
+            
+            // Só considerar agendamentos confirmados
+            if (data.Status !== 'Agendado') return;
+            
+            const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
+            const serviceDuration = data.duracaoMinutos || 30;
+            const endTime = startTime.add(serviceDuration, 'minutes');
+            busySlots.push({
+                start: startTime.hour() * 60 + startTime.minute(),
+                end: endTime.hour() * 60 + endTime.minute()
+            });
         });
-    });
+    
+    } catch (error) {
+        console.error("❌ Erro ao buscar agendamentos:", error);
+        // Se der erro, retornar lista vazia (assumir que não há conflitos)
+        const busySlots = [];
+    }
     
     const availableSlots = [];
     const currentTime = dayjs().tz(CONFIG.timezone);
@@ -460,29 +476,78 @@ async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
     const requestedStart = requestedDate.getTime();
     const requestedEnd = requestedStart + serviceDurationMs;
     
-    const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
-    const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
+    // Buscar em uma janela de tempo mais ampla para evitar problemas de índice
+    const searchStart = new Date(requestedStart - 4 * 60 * 60 * 1000); // 4 horas antes
+    const searchEnd = new Date(requestedStart + 4 * 60 * 60 * 1000);   // 4 horas depois
     
-    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
-    const q = schedulesRef
-        .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', searchStart.toISOString())
-        .where('DataHoraISO', '<=', searchEnd.toISOString());
+    const schedulesRef = db.collection(CONFIG.collections.barbearias)
+        .doc(barbeariaId)
+        .collection(CONFIG.collections.schedules);
     
-    const snapshot = await q.get();
-    
-    for (const doc of snapshot.docs) {
-        const existingData = doc.data();
-        if (existingData.Status !== 'Agendado') {
-            continue;
+    try {
+        // Consulta simples por data primeiro (sem filtro de Status)
+        const q = schedulesRef
+            .where('DataHoraISO', '>=', searchStart.toISOString())
+            .where('DataHoraISO', '<=', searchEnd.toISOString());
+        
+        const snapshot = await q.get();
+        
+        // Filtrar por Status no código (não na query)
+        for (const doc of snapshot.docs) {
+            const existingData = doc.data();
+            
+            // Só considerar agendamentos confirmados
+            if (existingData.Status !== 'Agendado') {
+                continue;
+            }
+            
+            const existingStart = new Date(existingData.DataHoraISO).getTime();
+            const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
+            
+            // Verificar sobreposição de horários
+            if (requestedStart < existingEnd && requestedEnd > existingStart) {
+                console.log(`⚠️ Conflito detectado com agendamento ${doc.id}:`, {
+                    existingStart: new Date(existingStart),
+                    existingEnd: new Date(existingEnd),
+                    requestedStart: new Date(requestedStart),
+                    requestedEnd: new Date(requestedEnd)
+                });
+                return true;
+            }
         }
-        const existingStart = new Date(existingData.DataHoraISO).getTime();
-        const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
-        if (requestedStart < existingEnd && requestedEnd > existingStart) {
-            return true;
+        
+        return false;
+        
+    } catch (error) {
+        console.error("❌ Erro ao verificar conflitos:", error);
+        
+        // Fallback: consulta mais simples se houver erro
+        try {
+            const fallbackQ = schedulesRef
+                .where('DataHoraISO', '>=', searchStart.toISOString())
+                .limit(50); // Limitar resultados
+                
+            const fallbackSnapshot = await fallbackQ.get();
+            
+            for (const doc of fallbackSnapshot.docs) {
+                const existingData = doc.data();
+                if (existingData.Status !== 'Agendado') continue;
+                
+                const existingStart = new Date(existingData.DataHoraISO).getTime();
+                const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
+                
+                if (requestedStart < existingEnd && requestedEnd > existingStart) {
+                    return true;
+                }
+            }
+            
+            return false;
+        } catch (fallbackError) {
+            console.error("❌ Erro no fallback também:", fallbackError);
+            // Em último caso, assumir que não há conflito
+            return false;
         }
     }
-    return false;
 }
 
 async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) {
