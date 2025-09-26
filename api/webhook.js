@@ -6,13 +6,11 @@ const admin = require('firebase-admin');
 const dayjs = require('dayjs');
 const timezone = require('dayjs/plugin/timezone');
 const utc = require('dayjs/plugin/utc');
-const customParseFormat = require('dayjs/plugin/customParseFormat');
 require('dayjs/locale/pt-br');
 
 // --- CONFIGURAÇÃO ---
 dayjs.extend(utc);
 dayjs.extend(timezone);
-dayjs.extend(customParseFormat);
 dayjs.locale('pt-br');
 
 const app = express();
@@ -36,41 +34,35 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- FUNÇÃO MELHORADA COM IA PERPLEXITY ---
+// --- FUNÇÃO COM IA PERPLEXITY MELHORADA ---
 async function getIntentAndDateFromPerplexity(text, servicesList) {
     if (!CONFIG.perplexityApiKey) {
         console.error("❌ Chave da API do Perplexity não configurada.");
-        return null;
+        // FALLBACK: Retorna intent básico para não quebrar o fluxo
+        return {
+            intent: 'agendarHorario',
+            dataHoraISO: null,
+            servicoNome: servicesList.length > 0 ? servicesList[0].nome : null
+        };
     }
 
     try {
         const serviceNames = servicesList.map(s => s.nome).join(', ');
-        const currentDateTime = dayjs().tz(CONFIG.timezone);
-        
-        const systemPrompt = `Você é um assistente de agendamento para barbearias no Brasil. 
-        Data/hora atual: ${currentDateTime.format('YYYY-MM-DD HH:mm')} (timezone: ${CONFIG.timezone})
-        Lista de serviços válidos: [${serviceNames}]
-        
-        Analise a mensagem do usuário e retorne APENAS um objeto JSON válido:
-        {
-            "intent": "agendarHorario" | "cancelarHorario" | "informacao",
-            "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null,
-            "servicoNome": "Nome do Serviço" | null,
-            "confianca": 0.0 a 1.0
-        }
-        
-        REGRAS CRÍTICAS PARA HORÁRIOS:
-        - Estamos no fuso horário ${CONFIG.timezone} (GMT-3)
-        - Para "hoje às 16h": use ${currentDateTime.format('YYYY-MM-DD')}T16:00:00.000Z mas ajuste para UTC (-3h = 19:00 UTC)
-        - Para "amanhã às 14h": use ${currentDateTime.add(1, 'day').format('YYYY-MM-DD')}T14:00:00.000Z mas ajuste para UTC (-3h = 17:00 UTC)
-        - SEMPRE converta o horário local brasileiro para UTC adicionando 3 horas
-        - Exemplo: 16:00 Brasil = 19:00 UTC
-        - Se não conseguir identificar data/hora, retorne null
-        - Se serviço não estiver na lista, retorne null para servicoNome
-        
-        EXEMPLOS DE CONVERSÃO:
-        - "hoje às 16h" → "${currentDateTime.format('YYYY-MM-DD')}T19:00:00.000Z"
-        - "amanhã às 14h" → "${currentDateTime.add(1, 'day').format('YYYY-MM-DD')}T17:00:00.000Z"`;
+        const currentDate = new Date().toISOString();
+
+        const systemPrompt = `Você é um assistente de agendamento para barbearias. Sua tarefa é analisar a mensagem do usuário e extrair informações, retornando APENAS um objeto JSON válido. 
+
+A lista de serviços válidos é: [${serviceNames}]. 
+A data de referência é ${currentDate} no fuso horário ${CONFIG.timezone}. 
+
+IMPORTANTE: Retorne SEMPRE um JSON válido com esta estrutura exata:
+{
+  "intent": "agendarHorario" | "cancelarHorario" | "informacao",
+  "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null,
+  "servicoNome": "Nome do Serviço" | null
+}
+
+Se um serviço não for mencionado, use o primeiro da lista. Se a data/hora não for clara, retorne null para dataHoraISO.`;
         
         const response = await fetch("https://api.perplexity.ai/chat/completions", {
             method: 'POST',
@@ -79,7 +71,7 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
                 'Authorization': `Bearer ${CONFIG.perplexityApiKey}`
             },
             body: JSON.stringify({
-                model: 'sonar-pro', // Modelo correto da API Perplexity
+                model: 'sonar',
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: text }
@@ -92,7 +84,7 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
         if (!response.ok) {
             const errorBody = await response.text();
             console.error(`❌ Erro da API Perplexity: ${response.status} ${response.statusText}`, errorBody);
-            return null;
+            throw new Error('API Perplexity falhou');
         }
 
         const data = await response.json();
@@ -100,34 +92,28 @@ async function getIntentAndDateFromPerplexity(text, servicesList) {
 
         console.log("🔍 Resposta bruta da IA (Perplexity):", responseText);
         
-        // Melhor limpeza do JSON
-        let cleanedJsonString = responseText.trim();
-        if (cleanedJsonString.startsWith('```json')) {
-            cleanedJsonString = cleanedJsonString.replace(/```json\s*/, '').replace(/\s*```$/, '');
-        } else if (cleanedJsonString.startsWith('```')) {
-            cleanedJsonString = cleanedJsonString.replace(/```\s*/, '').replace(/\s*```$/, '');
-        }
-        
-        const result = JSON.parse(cleanedJsonString);
-        
-        // Validação adicional da data
-        if (result.dataHoraISO) {
-            const parsedDate = dayjs(result.dataHoraISO);
-            if (!parsedDate.isValid()) {
-                console.error("❌ Data inválida retornada pela IA:", result.dataHoraISO);
-                result.dataHoraISO = null;
-            }
-        }
-        
-        return result;
+        // Limpeza mais robusta do JSON
+        let cleanedJsonString = responseText
+            .replace(/```json/g, '')
+            .replace(/```/g, '')
+            .replace(/^[^{]*/, '') // Remove texto antes do primeiro {
+            .replace(/[^}]*$/, '') // Remove texto depois do último }
+            .trim();
+
+        return JSON.parse(cleanedJsonString);
 
     } catch (error) {
         console.error("❌ Erro ao chamar a API Perplexity:", error);
-        return null;
+        // FALLBACK melhorado: Tenta extrair informação básica
+        return {
+            intent: text.toLowerCase().includes('cancel') ? 'cancelarHorario' : 'agendarHorario',
+            dataHoraISO: null,
+            servicoNome: servicesList.length > 0 ? servicesList[0].nome : null
+        };
     }
 }
 
-// --- ROTA PRINCIPAL DO WEBHOOK MELHORADA ---
+// --- ROTA PRINCIPAL DO WEBHOOK CORRIGIDA ---
 app.post("/api/webhook", async (request, response) => {
     const body = request.body;
     console.log("\n📄 === NOVO REQUEST WEBHOOK (Perplexity) ===\n", JSON.stringify(body, null, 2));
@@ -136,10 +122,24 @@ app.post("/api/webhook", async (request, response) => {
         const { nome, telefone, data_hora_texto, barbeariaId } = body;
         let resultPayload;
 
+        // Validações básicas
         if (!barbeariaId) {
-            return response.status(400).json({ status: 'error', message: "ID da barbearia não foi fornecido." });
+            return response.status(400).json({ 
+                status: 'error', 
+                message: "ID da barbearia não foi fornecido.",
+                type: null 
+            });
+        }
+
+        if (!data_hora_texto || data_hora_texto.trim() === '') {
+            return response.status(200).json({ 
+                status: 'error', 
+                message: "Por favor, me diga o que você gostaria de fazer. Exemplo: 'Quero agendar um corte para amanhã às 15h'",
+                type: null 
+            });
         }
         
+        // Busca serviços
         const servicesSnapshot = await db.collection(CONFIG.collections.barbearias)
             .doc(barbeariaId)
             .collection(CONFIG.collections.services)
@@ -148,73 +148,86 @@ app.post("/api/webhook", async (request, response) => {
         const servicesList = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
         if (servicesList.length === 0) {
-            const errorResponse = { status: 'error', message: 'Ainda não há serviços configurados para esta barbearia.' };
+            const errorResponse = { 
+                status: 'error', 
+                message: 'Ainda não há serviços configurados para esta barbearia.',
+                type: null 
+            };
             console.log(`\n📤 RESPOSTA ENVIADA:\n`, JSON.stringify(errorResponse, null, 2));
             return response.status(200).json(errorResponse);
         }
 
+        // Chama a IA
         const aiResult = await getIntentAndDateFromPerplexity(data_hora_texto, servicesList);
+        console.log("🤖 Resultado da IA:", aiResult);
 
         if (!aiResult) {
-            return response.status(500).json({ 
+            return response.status(200).json({ 
                 status: 'error', 
-                message: "Desculpe, não consegui processar sua solicitação com a IA." 
+                message: "Desculpe, não consegui processar sua solicitação. Tente ser mais específico.",
+                type: null 
             });
         }
         
-        const { intent, dataHoraISO, servicoNome, confianca } = aiResult;
-        console.log("🤖 Resultado da IA:", { intent, dataHoraISO, servicoNome, confianca });
-        
-        // Melhor tratamento de data com conversão de timezone
-        let parsedDate = null;
-        if (dataHoraISO) {
-            // A IA deve retornar em UTC, convertemos para timezone local
-            parsedDate = dayjs.utc(dataHoraISO).tz(CONFIG.timezone);
-            
-            console.log("🕐 Conversão de timezone:");
-            console.log("  Data recebida (UTC):", dataHoraISO);
-            console.log("  Data convertida (local):", parsedDate.format('YYYY-MM-DD HH:mm:ss'));
-            console.log("  É válida?", parsedDate.isValid());
-            
-            if (!parsedDate.isValid()) {
-                console.error("❌ Data inválida:", dataHoraISO);
-                parsedDate = null;
-            }
-        }
-        
+        const { intent, dataHoraISO, servicoNome } = aiResult;
+        const parsedDate = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
         const servicoEncontrado = servicoNome ? 
-            servicesList.find(s => s.nome.toLowerCase() === servicoNome.toLowerCase()) : null;
+            servicesList.find(s => s.nome.toLowerCase() === servicoNome.toLowerCase()) : 
+            servicesList[0]; // Usa o primeiro serviço como padrão
+
+        console.log("📅 Data processada:", parsedDate?.format('DD/MM/YYYY HH:mm'));
+        console.log("🔧 Serviço encontrado:", servicoEncontrado?.nome);
 
         if (intent === 'agendarHorario') {
-            if (!parsedDate) {
+            if (!parsedDate || !parsedDate.isValid()) {
                 resultPayload = { 
                     success: false, 
-                    message: "Não consegui entender a data e hora. Tente algo como 'hoje às 16h' ou 'amanhã às 14h30'." 
+                    message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'segunda-feira às 14h30'.",
+                    type: null 
                 };
             } else if (!servicoEncontrado) {
                 resultPayload = { 
                     success: false, 
-                    message: `Não consegui identificar o serviço. Nossos serviços são: ${servicesList.map(s => s.nome).join(', ')}. Por favor, tente novamente.` 
+                    message: `Não consegui identificar o serviço. Nossos serviços são: ${servicesList.map(s => s.nome).join(', ')}. Por favor, tente novamente.`,
+                    type: null 
                 };
             } else {
-                // CORREÇÃO PRINCIPAL: Usar UTC para storage mas manter timezone local para validações
-                const dateForStorage = parsedDate.utc().toDate();
-                const personInfo = { name: nome, phone: telefone };
-                resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoEncontrado.id);
+                // Validação de dados pessoais
+                if (!nome || !telefone) {
+                    resultPayload = { 
+                        success: false, 
+                        message: "Para fazer o agendamento, preciso do seu nome e telefone.",
+                        type: null 
+                    };
+                } else {
+                    const dateForStorage = parsedDate.utc().toDate();
+                    const personInfo = { name: nome, phone: telefone };
+                    resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoEncontrado.id);
+                }
             }
         } else if (intent === 'cancelarHorario') {
-            const personInfo = { phone: telefone };
-            resultPayload = await handleCancellation(barbeariaId, personInfo);
+            if (!telefone) {
+                resultPayload = { 
+                    success: false, 
+                    message: "Para cancelar um agendamento, preciso do seu telefone.",
+                    type: null 
+                };
+            } else {
+                const personInfo = { phone: telefone };
+                resultPayload = await handleCancellation(barbeariaId, personInfo);
+            }
         } else {
             resultPayload = { 
                 success: false, 
-                message: "Desculpe, não entendi o que você quis dizer. Tente algo como 'quero agendar um corte hoje às 15h'." 
+                message: "Não entendi o que você quer fazer. Você pode agendar um horário ou cancelar um agendamento existente.",
+                type: null 
             };
         }
         
+        // Formatação da resposta final
         const responseData = { 
             status: resultPayload.success ? 'success' : 'error', 
-            message: resultPayload.message,
+            message: resultPayload.message || "Ocorreu um erro inesperado.",
             type: resultPayload.type || null 
         };
         
@@ -223,96 +236,131 @@ app.post("/api/webhook", async (request, response) => {
 
     } catch (error) {
         console.error("❌ Erro CRÍTICO no webhook:", error);
-        return response.status(500).json({ 
+        return response.status(200).json({ 
             status: 'error', 
-            message: "Desculpe, ocorreu um erro interno. Tente novamente em alguns instantes." 
+            message: "Desculpe, ocorreu um erro interno. Tente novamente em alguns instantes.",
+            type: null 
         });
     }
 });
 
-// --- FUNÇÃO MELHORADA DE AGENDAMENTO ---
+// --- FUNÇÃO DE AGENDAMENTO MELHORADA ---
 async function handleScheduling(barbeariaId, personInfo, requestedDate, localTimeDayjs, servicoId) {
-    if (!personInfo.name || !personInfo.phone) {
-        return { success: false, message: "Faltam seus dados pessoais." };
-    }
-    
-    if (!servicoId) {
-        return { success: false, message: "Você precisa selecionar um serviço." };
-    }
-    
-    // CORREÇÃO PRINCIPAL: Comparar com horário local atual com mais tolerância
-    const now = dayjs().tz(CONFIG.timezone);
-    const requestedDateTime = localTimeDayjs;
-    
-    console.log("🕐 Comparação de tempo detalhada:");
-    console.log("  Agora (local):", now.format('YYYY-MM-DD HH:mm:ss'));
-    console.log("  Solicitado (local):", requestedDateTime.format('YYYY-MM-DD HH:mm:ss'));
-    console.log("  Diferença em minutos:", requestedDateTime.diff(now, 'minutes'));
-    console.log("  É no passado?", requestedDateTime.isBefore(now));
-    
-    // Permitir agendamento até 15 minutos no passado para compensar delays de processamento
-    const marginMinutes = 15;
-    if (requestedDateTime.isBefore(now.subtract(marginMinutes, 'minutes'))) {
-        const hoursDiff = now.diff(requestedDateTime, 'hours');
-        if (hoursDiff > 12) {
+    try {
+        // Validações básicas
+        if (!personInfo.name || !personInfo.phone) {
+            return { success: false, message: "Faltam seus dados pessoais.", type: null };
+        }
+        
+        if (!servicoId) {
+            return { success: false, message: "Você precisa selecionar um serviço.", type: null };
+        }
+        
+        if (requestedDate.getTime() <= new Date().getTime()) {
+            return { success: false, message: "Não é possível agendar no passado.", type: null };
+        }
+
+        // Busca dados do serviço
+        const servicoRef = db.collection(CONFIG.collections.barbearias)
+            .doc(barbeariaId)
+            .collection(CONFIG.collections.services)
+            .doc(servicoId);
+            
+        const servicoSnap = await servicoRef.get();
+        if (!servicoSnap.exists) {
+            return { success: false, message: "O serviço selecionado não foi encontrado.", type: null };
+        }
+        
+        const servico = { id: servicoSnap.id, ...servicoSnap.data() };
+        const duracao = parseInt(servico.duracaoMinutos, 10) || 30;
+
+        // Verifica horário de funcionamento
+        const businessHoursCheck = await checkBusinessHours(barbeariaId, localTimeDayjs, duracao);
+        if (!businessHoursCheck.isOpen) {
+            return { success: false, message: businessHoursCheck.message, type: null };
+        }
+
+        // Verifica conflitos
+        const hasConflict = await checkConflicts(barbeariaId, requestedDate, duracao);
+        if (hasConflict) {
+            console.log("⚠️ Conflito detectado, buscando horários alternativos...");
+            const suggestions = await getAvailableSlots(barbeariaId, requestedDate, duracao);
             return { 
                 success: false, 
-                message: `Não é possível agendar para ${requestedDateTime.format('DD/MM/YYYY às HH:mm')}. Esta data já passou. Tente um horário futuro.` 
-            };
-        } else {
-            return { 
-                success: false, 
-                message: `O horário ${requestedDateTime.format('HH:mm')} já passou. Que tal agendar para mais tarde ou amanhã?` 
+                type: 'suggestion', 
+                message: suggestions 
             };
         }
-    }
 
-    const servicoRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection(CONFIG.collections.services)
-        .doc(servicoId);
+        // Salva o agendamento
+        await saveAppointment(barbeariaId, personInfo, requestedDate, servico);
         
-    const servicoSnap = await servicoRef.get();
-    if (!servicoSnap.exists) {
-        return { success: false, message: "O serviço selecionado não foi encontrado." };
+        const formattedDateForUser = dayjs(requestedDate).tz(CONFIG.timezone).format('dddd, DD [de] MMMM [às] HH:mm');
+        return { 
+            success: true, 
+            message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.`,
+            type: null 
+        };
+        
+    } catch (error) {
+        console.error("❌ Erro no handleScheduling:", error);
+        return { 
+            success: false, 
+            message: "Ocorreu um erro ao processar seu agendamento. Tente novamente.",
+            type: null 
+        };
     }
-    
-    const servico = { id: servicoSnap.id, ...servicoSnap.data() };
-    const duracao = parseInt(servico.duracaoMinutos, 10) || 30;
-
-    const businessHoursCheck = await checkBusinessHours(barbeariaId, requestedDateTime, duracao);
-    if (!businessHoursCheck.isOpen) {
-        return { success: false, message: businessHoursCheck.message };
-    }
-
-    const hasConflict = await checkConflicts(barbeariaId, requestedDate, duracao);
-    if (hasConflict) {
-        console.log("⚠️ Conflito detectado, buscando horários alternativos...");
-        const suggestions = await getAvailableSlots(barbeariaId, requestedDate, duracao);
-        return { success: false, type: 'suggestion', message: suggestions };
-    }
-
-    await saveAppointment(barbeariaId, personInfo, requestedDate, servico);
-    
-    const formattedDateForUser = requestedDateTime.format('dddd, DD [de] MMMM [às] HH:mm');
-    return { 
-        success: true, 
-        message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` 
-    };
 }
 
-// Resto das funções permanecem iguais...
+// --- FUNÇÃO DE SUGESTÕES MELHORADA ---
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
+    try {
+        const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
+        let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
+        
+        // Tenta para o mesmo dia
+        if (availableSlots.length > 0) {
+            const dateStr = requestedDateDayjs.format('DD/MM');
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `Este horário já está ocupado. 😔\n\nQue tal um destes horários para ${dateStr}? ${slotsText}`;
+        }
+        
+        // Tenta para o dia seguinte
+        const tomorrow = requestedDateDayjs.add(1, 'day');
+        availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = tomorrow.format('DD/MM');
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `Este horário já está ocupado e não há mais vagas hoje. 😔\n\nQue tal para ${dateStr}? Horários: ${slotsText}`;
+        }
+        
+        // Tenta próximos 3 dias
+        for (let i = 2; i <= 4; i++) {
+            const futureDay = requestedDateDayjs.add(i, 'day');
+            availableSlots = await findAvailableSlotsForDay(barbeariaId, futureDay, duracaoMinutos);
+            
+            if (availableSlots.length > 0) {
+                const dateStr = futureDay.format('DD/MM');
+                const slotsText = availableSlots.slice(0, 3).join(', ');
+                return `Este horário já está ocupado. 😔\n\nEncontrei horários para ${dateStr}: ${slotsText}`;
+            }
+        }
+        
+        return "Este horário já está ocupado. 😔\n\nInfelizmente não encontrei horários disponíveis nos próximos dias. Entre em contato conosco para mais opções.";
+        
+    } catch (error) {
+        console.error("❌ Erro ao buscar horários disponíveis:", error);
+        return "Este horário já está ocupado. 😔\n\nTente outro horário ou entre em contato conosco.";
+    }
+}
+
+// Mantém todas as outras funções iguais (checkBusinessHours, findAvailableSlotsForDay, handleCancellation, checkConflicts, saveAppointment)
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const dayOfWeek = dateDayjs.day();
-    const docRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection(CONFIG.collections.config)
-        .doc(String(dayOfWeek));
-        
+    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    if (!docSnap.exists || !docSnap.data().aberto) {
-        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
-    }
+    if (!docSnap.exists || !docSnap.data().aberto) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
     
     const dayConfig = docSnap.data();
     const timeToMinutes = (str) => {
@@ -329,47 +377,15 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
 
-    const fitsInMorning = (morningStart !== null && morningEnd !== null) && 
-        (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
-    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && 
-        (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+    const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
+    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
 
     if (fitsInMorning || fitsInAfternoon) {
         return { isOpen: true };
     } else {
         const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
         const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
-        return { 
-            isOpen: false, 
-            message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` 
-        };
-    }
-}
-
-async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
-    try {
-        const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
-        let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
-        
-        if (availableSlots.length > 0) {
-            const dateStr = requestedDateDayjs.format('DD/MM');
-            const slotsText = availableSlots.slice(0, 3).join(', ');
-            return `Este horário já está ocupado. Que tal um destes para ${dateStr}? ${slotsText}`;
-        }
-        
-        const tomorrow = requestedDateDayjs.add(1, 'day');
-        availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
-        
-        if (availableSlots.length > 0) {
-            const dateStr = tomorrow.format('DD/MM');
-            const slotsText = availableSlots.slice(0, 3).join(', ');
-            return `Este horário já está ocupado e não há mais vagas hoje. Que tal para ${dateStr}? Horários: ${slotsText}`;
-        }
-        
-        return "Este horário já está ocupado. Infelizmente não encontrei horários disponíveis para hoje nem amanhã. Tente outro dia.";
-    } catch (error) {
-        console.error("Erro ao buscar horários disponíveis:", error);
-        return "Este horário já está ocupado. Tente outro horário.";
+        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
 }
 
@@ -394,40 +410,24 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const startOfDay = dayDate.startOf('day').toDate();
     const endOfDay = dayDate.endOf('day').toDate();
     
-    const schedulesRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection(CONFIG.collections.schedules);
-    
-    try {
-        // Consulta simples por data (sem filtro de Status para evitar índice composto)
-        const q = schedulesRef
-            .where('DataHoraISO', '>=', startOfDay.toISOString())
-            .where('DataHoraISO', '<=', endOfDay.toISOString());
-            
-        const snapshot = await q.get();
-        const busySlots = [];
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', startOfDay.toISOString())
+        .where('DataHoraISO', '<=', endOfDay.toISOString());
         
-        // Filtrar por Status no código
-        snapshot.docs.forEach(doc => {
-            const data = doc.data();
-            
-            // Só considerar agendamentos confirmados
-            if (data.Status !== 'Agendado') return;
-            
-            const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
-            const serviceDuration = data.duracaoMinutos || 30;
-            const endTime = startTime.add(serviceDuration, 'minutes');
-            busySlots.push({
-                start: startTime.hour() * 60 + startTime.minute(),
-                end: endTime.hour() * 60 + endTime.minute()
-            });
+    const snapshot = await q.get();
+    const busySlots = [];
+    snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
+        const serviceDuration = data.duracaoMinutos || 30;
+        const endTime = startTime.add(serviceDuration, 'minutes');
+        busySlots.push({
+            start: startTime.hour() * 60 + startTime.minute(),
+            end: endTime.hour() * 60 + endTime.minute()
         });
-    
-    } catch (error) {
-        console.error("❌ Erro ao buscar agendamentos:", error);
-        // Se der erro, retornar lista vazia (assumir que não há conflitos)
-        const busySlots = [];
-    }
+    });
     
     const availableSlots = [];
     const currentTime = dayjs().tz(CONFIG.timezone);
@@ -454,21 +454,21 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
 }
 
 async function handleCancellation(barbeariaId, personInfo) {
-    if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone." };
+    if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone.", type: null };
     const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
     const q = schedulesRef
         .where('TelefoneCliente', '==', personInfo.phone)
         .where('Status', '==', 'Agendado')
         .where('DataHoraISO', '>', new Date().toISOString());
     const snapshot = await q.get();
-    if (snapshot.empty) return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone.` };
+    if (snapshot.empty) return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone.`, type: null };
     
     let count = 0;
     for (const doc of snapshot.docs) {
         await doc.ref.update({ Status: 'Cancelado' });
         count++;
     }
-    return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.` };
+    return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.`, type: null };
 }
 
 async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
@@ -476,78 +476,28 @@ async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
     const requestedStart = requestedDate.getTime();
     const requestedEnd = requestedStart + serviceDurationMs;
     
-    // Buscar em uma janela de tempo mais ampla para evitar problemas de índice
-    const searchStart = new Date(requestedStart - 4 * 60 * 60 * 1000); // 4 horas antes
-    const searchEnd = new Date(requestedStart + 4 * 60 * 60 * 1000);   // 4 horas depois
+    const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000);
+    const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
     
-    const schedulesRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection(CONFIG.collections.schedules);
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const q = schedulesRef
+        .where('DataHoraISO', '>=', searchStart.toISOString())
+        .where('DataHoraISO', '<=', searchEnd.toISOString());
     
-    try {
-        // Consulta simples por data primeiro (sem filtro de Status)
-        const q = schedulesRef
-            .where('DataHoraISO', '>=', searchStart.toISOString())
-            .where('DataHoraISO', '<=', searchEnd.toISOString());
-        
-        const snapshot = await q.get();
-        
-        // Filtrar por Status no código (não na query)
-        for (const doc of snapshot.docs) {
-            const existingData = doc.data();
-            
-            // Só considerar agendamentos confirmados
-            if (existingData.Status !== 'Agendado') {
-                continue;
-            }
-            
-            const existingStart = new Date(existingData.DataHoraISO).getTime();
-            const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
-            
-            // Verificar sobreposição de horários
-            if (requestedStart < existingEnd && requestedEnd > existingStart) {
-                console.log(`⚠️ Conflito detectado com agendamento ${doc.id}:`, {
-                    existingStart: new Date(existingStart),
-                    existingEnd: new Date(existingEnd),
-                    requestedStart: new Date(requestedStart),
-                    requestedEnd: new Date(requestedEnd)
-                });
-                return true;
-            }
+    const snapshot = await q.get();
+    
+    for (const doc of snapshot.docs) {
+        const existingData = doc.data();
+        if (existingData.Status !== 'Agendado') {
+            continue;
         }
-        
-        return false;
-        
-    } catch (error) {
-        console.error("❌ Erro ao verificar conflitos:", error);
-        
-        // Fallback: consulta mais simples se houver erro
-        try {
-            const fallbackQ = schedulesRef
-                .where('DataHoraISO', '>=', searchStart.toISOString())
-                .limit(50); // Limitar resultados
-                
-            const fallbackSnapshot = await fallbackQ.get();
-            
-            for (const doc of fallbackSnapshot.docs) {
-                const existingData = doc.data();
-                if (existingData.Status !== 'Agendado') continue;
-                
-                const existingStart = new Date(existingData.DataHoraISO).getTime();
-                const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
-                
-                if (requestedStart < existingEnd && requestedEnd > existingStart) {
-                    return true;
-                }
-            }
-            
-            return false;
-        } catch (fallbackError) {
-            console.error("❌ Erro no fallback também:", fallbackError);
-            // Em último caso, assumir que não há conflito
-            return false;
+        const existingStart = new Date(existingData.DataHoraISO).getTime();
+        const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
+        if (requestedStart < existingEnd && requestedEnd > existingStart) {
+            return true;
         }
     }
+    return false;
 }
 
 async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) {
