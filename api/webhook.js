@@ -53,7 +53,7 @@ Se o serviço não for claro, retorne null. Se a data/hora não for clara, retor
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${CONFIG.perplexityApiKey}` },
             body: JSON.stringify({
-                model: 'sonar-small-online',
+                model: 'sonar',
                 messages: [ { role: 'system', content: systemPrompt }, { role: 'user', content: text } ],
                 max_tokens: 200,
                 temperature: 0.1
