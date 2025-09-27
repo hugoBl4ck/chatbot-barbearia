@@ -288,7 +288,12 @@ app.post("/api/webhook", async (request, response) => {
             type: resultPayload.type || null 
         };
         
-        console.log(`\n📤 RESPOSTA ENVIADA:\n`, JSON.stringify(responseData, null, 2));
+        console.log(`\n📤 RESPOSTA ENVIADA PARA O TYPEBOT:\n`, JSON.stringify(responseData, null, 2));
+        console.log(`\n🔍 VARIÁVEIS QUE DEVERIAM SER DEFINIDAS:`);
+        console.log(`   - @webhook_status: "${responseData.status}"`);
+        console.log(`   - @webhook_message: "${responseData.message}"`);
+        console.log(`   - @webhook_type: "${responseData.type}"`);
+        
         return response.status(200).json(responseData);
 
     } catch (error) {
