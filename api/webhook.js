@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK MULTI-TENANT COM IA PERPLEXITY - VERSÃO 4.1 (COMPLETA E OTIMIZADA)
+// WEBHOOK MULTI-TENANT COM IA PERPLEXITY - VERSÃO 4.2 (FINAL COM CORREÇÃO DE TIMEZONE)
 // =================================================================
 const express = require('express');
 const admin = require('firebase-admin');
@@ -8,7 +8,6 @@ const timezone = require('dayjs/plugin/timezone');
 const utc = require('dayjs/plugin/utc');
 require('dayjs/locale/pt-br');
 
-// --- CONFIGURAÇÃO ---
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.locale('pt-br');
@@ -20,12 +19,7 @@ const CONFIG = {
     firebaseCreds: JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'),
     perplexityApiKey: process.env.PERPLEXITY_API_KEY,
     timezone: 'America/Sao_Paulo',
-    collections: {
-        barbearias: 'barbearias',
-        schedules: 'agendamentos',
-        config: 'horarios',
-        services: 'servicos'
-    }
+    collections: { barbearias: 'barbearias', schedules: 'agendamentos', config: 'horarios', services: 'servicos' }
 };
 
 if (!admin.apps.length) {
@@ -33,7 +27,6 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- FUNÇÃO COM IA PERPLEXITY ---
 async function getIntentWithPerplexity(text, servicesList) {
     if (!CONFIG.perplexityApiKey) {
         console.error("❌ Chave da API do Perplexity não configurada.");
@@ -42,12 +35,7 @@ async function getIntentWithPerplexity(text, servicesList) {
     try {
         const serviceNames = servicesList.map(s => `"${s.nome}"`).join(', ');
         const currentLocalTime = dayjs().tz(CONFIG.timezone).format('dddd, DD/MM/YYYY HH:mm');
-        
-        const systemPrompt = `Você é um assistente de agendamento para uma barbearia no Brasil (fuso horário: America/Sao_Paulo). A data/hora atual de referência é ${currentLocalTime}.
-SERVIÇOS DISPONÍVEIS: [${serviceNames}].
-Sua tarefa é analisar a mensagem do usuário e retornar APENAS um objeto JSON válido com a estrutura:
-{"intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss-03:00" | null, "servicoNome": "Nome Exato do Serviço" | null}
-Se o serviço não for claro, retorne null. Se a data/hora não for clara, retorne null. Seja preciso com a data e hora no fuso brasileiro.`;
+        const systemPrompt = `Você é um assistente de agendamento para uma barbearia no Brasil (fuso horário: America/Sao_Paulo). A data/hora atual de referência é ${currentLocalTime}. Serviços disponíveis: [${serviceNames}]. Sua tarefa é analisar a mensagem do usuário e retornar APENAS um objeto JSON válido com a estrutura: {"intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss-03:00" | null, "servicoNome": "Nome Exato do Serviço" | null}. Se algo não for claro, retorne null. Seja preciso com a data e hora no fuso brasileiro.`;
         
         const response = await fetch("https://api.perplexity.ai/chat/completions", {
             method: 'POST',
@@ -55,40 +43,31 @@ Se o serviço não for claro, retorne null. Se a data/hora não for clara, retor
             body: JSON.stringify({
                 model: 'sonar',
                 messages: [ { role: 'system', content: systemPrompt }, { role: 'user', content: text } ],
-                max_tokens: 200,
-                temperature: 0.1
+                max_tokens: 200, temperature: 0.1
             })
         });
 
         if (!response.ok) throw new Error(`API Perplexity falhou com status ${response.status}`);
-        
         const data = await response.json();
         const responseText = data.choices[0].message.content;
         console.log("🔍 Resposta bruta da IA:", responseText);
-        
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("A resposta da IA não continha um JSON válido.");
-
+        if (!jsonMatch) throw new Error("A resposta da IA não continha JSON.");
         return { success: true, data: JSON.parse(jsonMatch[0]) };
-
     } catch (error) {
         console.error("❌ Erro ao chamar a API Perplexity:", error);
         return { success: false, message: "Não consegui entender sua solicitação no momento." };
     }
 }
 
-// --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post("/api/webhook", async (request, response) => {
     const { nome, telefone, data_hora_texto, barbeariaId } = request.body;
     console.log("\n📄 === NOVO REQUEST WEBHOOK ===\n", JSON.stringify(request.body, null, 2));
-
     try {
         if (!barbeariaId || !data_hora_texto) return response.status(400).json({ status: 'error', message: 'Dados insuficientes.' });
-
         const barbeariaRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId);
         const barbeariaSnap = await barbeariaRef.get();
         if (!barbeariaSnap.exists) return response.status(200).json({ status: 'error', message: 'Barbearia não encontrada.' });
-
         const servicesSnapshot = await barbeariaRef.collection(CONFIG.collections.services).where('ativo', '==', true).get();
         const servicesList = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         if (servicesList.length === 0) return response.status(200).json({ status: 'error', message: 'Nenhum serviço configurado.' });
@@ -98,20 +77,20 @@ app.post("/api/webhook", async (request, response) => {
 
         const { intent, dataHoraISO, servicoNome } = aiResponse.data;
         
-        const parsedDate = dataHoraISO ? dayjs.tz(dataHoraISO, CONFIG.timezone) : null;
+        const parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO) : null;
 
         let resultPayload;
         const personInfo = { name: nome, phone: telefone };
 
         if (intent === 'agendarHorario') {
-            if (!parsedDate || !parsedDate.isValid()) {
+            if (!parsedDateDayjs || !parsedDateDayjs.isValid()) {
                 resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h'." };
             } else {
                 const servicoEncontrado = servicoNome ? servicesList.find(s => s.nome.toLowerCase() === servicoNome.toLowerCase()) : servicesList[0];
                 if (!servicoEncontrado) {
                     resultPayload = { success: false, message: `Não encontrei o serviço "${servicoNome}".` };
                 } else {
-                    resultPayload = await handleScheduling(barbeariaId, personInfo, parsedDate, servicoEncontrado.id);
+                    resultPayload = await handleScheduling(barbeariaId, personInfo, parsedDateDayjs, servicoEncontrado.id);
                 }
             }
         } else if (intent === 'cancelarHorario') {
@@ -128,11 +107,14 @@ app.post("/api/webhook", async (request, response) => {
         return response.status(200).json({ status: 'error', message: 'Desculpe, ocorreu um erro interno.' });
     }
 });
-
-// --- FUNÇÕES DE LÓGICA DE NEGÓCIOS ---
+    
 async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, servicoId) {
     if (!personInfo.name || !personInfo.phone) return { success: false, message: 'Para agendar, preciso do seu nome e telefone.' };
-    if (requestedDateDayjs.isBefore(dayjs().tz(CONFIG.timezone))) return { success: false, message: 'Não é possível agendar no passado.' };
+    
+    // Agora comparamos com a hora atual consciente do fuso horário
+    if (requestedDateDayjs.isBefore(dayjs().tz(CONFIG.timezone))) {
+        return { success: false, message: 'Não é possível agendar no passado.' };
+    }
 
     const servicoRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.services).doc(servicoId);
     const servicoSnap = await servicoRef.get();
@@ -156,30 +138,49 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
 
-async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
-    try {
-        const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
-        let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
-        if (availableSlots.length > 0) {
-            return `O horário solicitado está ocupado. 😔\nMas tenho estes horários livres hoje: ${availableSlots.slice(0, 3).join(', ')}. Algum desses funciona?`;
-        }
-        const tomorrow = requestedDateDayjs.add(1, 'day');
-        availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
-        if (availableSlots.length > 0) {
-            return `Não tenho mais vagas para hoje. 😔\nPara amanhã, tenho estes horários: ${availableSlots.slice(0, 3).join(', ')}. Quer marcar um desses?`;
-        }
-        return "Este horário já está ocupado e não encontrei outras vagas próximas. 😔 Por favor, tente outro dia.";
-    } catch (error) {
-        console.error("❌ Erro ao buscar horários disponíveis:", error);
-        return "Este horário está ocupado. Tente outro ou entre em contato conosco.";
+async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
+    const dayOfWeek = dateDayjs.day();
+    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
+    const docSnap = await docRef.get();
+    if (!docSnap.exists || !docSnap.data().aberto) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    
+    const dayConfig = docSnap.data();
+    const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
+    
+    const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
+    const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
+    const morningStart = timeToMinutes(dayConfig.InicioManha);
+    const morningEnd = timeToMinutes(dayConfig.FimManha);
+    const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
+    const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
+
+    const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
+    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+    
+    if (fitsInMorning || fitsInAfternoon) {
+        return { isOpen: true };
+    } else {
+        const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
+        const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
+        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
     }
+}
+
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
+    const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
+    let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
+    if (availableSlots.length > 0) return `O horário solicitado está ocupado. 😔\nMas tenho estes horários livres hoje: ${availableSlots.slice(0, 3).join(', ')}.`;
+    const tomorrow = requestedDateDayjs.add(1, 'day');
+    availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
+    if (availableSlots.length > 0) return `Não tenho mais vagas para hoje. 😔\nPara amanhã, tenho estes horários: ${availableSlots.slice(0, 3).join(', ')}.`;
+    return "Este horário já está ocupado e não encontrei outras vagas próximas. 😔";
 }
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const dayOfWeek = dayDate.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    if (!docSnap.exists() || !docSnap.data().aberto) return [];
+    if (!docSnap.exists || !docSnap.data().aberto) return [];
     
     const dayConfig = docSnap.data();
     const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
@@ -220,70 +221,14 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     return availableSlots;
 }
 
-async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
-    const dayOfWeek = dateDayjs.day();
-    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
-    const docSnap = await docRef.get();
-
-    if (!docSnap.exists || !docSnap.data().aberto) {
-        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
-    }
-    
-    const dayConfig = docSnap.data();
-    const timeToMinutes = (str) => {
-        if (!str) return null;
-        const [h, m] = str.split(':').map(Number);
-        return (h * 60) + (m || 0);
-    };
-    
-    const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
-    const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
-
-    const morningStart = timeToMinutes(dayConfig.InicioManha);
-    const morningEnd = timeToMinutes(dayConfig.FimManha);
-    const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
-    const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
-
-    // --- LOG DE DEPURAÇÃO ADICIONADO ---
-    console.log("--- Depurando checkBusinessHours ---");
-    console.log({
-        horario_solicitado: dateDayjs.format('HH:mm'),
-        duracao: duracaoMinutos,
-        inicio_solicitado_min: requestedStartMinutes,
-        fim_solicitado_min: requestedEndMinutes,
-        manha_inicio_min: morningStart,
-        manha_fim_min: morningEnd,
-        tarde_inicio_min: afternoonStart,
-        tarde_fim_min: afternoonEnd
-    });
-    // --- FIM DO LOG ---
-
-    const fitsInMorning = (morningStart !== null && morningEnd !== null) && 
-                         (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
-    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && 
-                           (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
-
-    if (fitsInMorning || fitsInAfternoon) {
-        return { isOpen: true };
-    } else {
-        const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
-        const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
-        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
-    }
-}
-
 async function handleCancellation(barbeariaId, personInfo) {
     if (!personInfo.phone) return { success: false, message: "Para cancelar, preciso do seu telefone.", type: null };
     const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
     const q = query(schedulesRef, where('TelefoneCliente', '==', personInfo.phone), where('Status', '==', 'Agendado'), where('DataHoraISO', '>', new Date().toISOString()));
     const snapshot = await q.get();
     if (snapshot.empty) return { success: false, message: `Não encontrei nenhum agendamento futuro no seu telefone.`, type: null };
-    
     let count = 0;
-    for (const doc of snapshot.docs) {
-        await doc.ref.update({ Status: 'Cancelado' });
-        count++;
-    }
+    for (const doc of snapshot.docs) { await doc.ref.update({ Status: 'Cancelado' }); count++; }
     return { success: true, message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.`, type: null };
 }
 
@@ -295,16 +240,12 @@ async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
     const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000);
     const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
     const q = query(schedulesRef, where('Status', '==', 'Agendado'), where('DataHoraISO', '>=', searchStart.toISOString()), where('DataHoraISO', '<=', searchEnd.toISOString()));
-    
     const snapshot = await q.get();
-    
     for (const doc of snapshot.docs) {
         const existingData = doc.data();
         const existingStart = new Date(existingData.DataHoraISO).getTime();
         const existingEnd = existingStart + ((existingData.duracaoMinutos || 30) * 60 * 1000);
-        if (requestedStart < existingEnd && requestedEnd > existingStart) {
-            return true;
-        }
+        if (requestedStart < existingEnd && requestedEnd > existingStart) { return true; }
     }
     return false;
 }
