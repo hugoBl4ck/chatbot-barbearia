@@ -42,7 +42,38 @@ async function getIntentWithPerplexity(text, servicesList) {
   }
   try {
     const serviceNames = servicesList.map((s) => `"${s.nome}"`).join(', ')
-    const systemPrompt = `Você é um assistente de agendamento. Analise a mensagem do usuário e retorne APENAS um objeto JSON. A data de referência é ${dayjs().tz(CONFIG.timezone).toISOString()}. Os serviços disponíveis são: [${serviceNames}]. A estrutura do JSON deve ser: {"intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss.sssZ" | null, "servicoNome": "Nome do Serviço" | null}. Se a data ou serviço não forem claros, retorne null para os respectivos campos.`
+    
+    // CORREÇÃO: Data/hora atual no fuso local para referência da IA
+    const currentLocalTime = dayjs().tz(CONFIG.timezone).format('YYYY-MM-DD HH:mm:ss')
+    const currentLocalISO = dayjs().tz(CONFIG.timezone).toISOString()
+    
+    // PROMPT MELHORADO com instruções claras sobre fuso horário
+    const systemPrompt = `Você é um assistente de agendamento para uma barbearia no Brasil (fuso horário: America/Sao_Paulo, UTC-3).
+
+INFORMAÇÕES ATUAIS:
+- Data/hora atual no Brasil: ${currentLocalTime}
+- ISO atual (referência): ${currentLocalISO}
+
+SERVIÇOS DISPONÍVEIS: [${serviceNames}]
+
+INSTRUÇÕES IMPORTANTES:
+1. Quando o usuário disser "hoje às 9h", isso significa 9h no horário local do Brasil (UTC-3)
+2. Retorne a dataHoraISO sempre no fuso horário brasileiro, NÃO em UTC
+3. Use o formato ISO com offset brasileiro: "YYYY-MM-DDTHH:mm:ss-03:00"
+4. Se disser "hoje", use a data atual: ${dayjs().tz(CONFIG.timezone).format('YYYY-MM-DD')}
+
+FORMATO DE RESPOSTA (JSON apenas):
+{
+  "intent": "agendarHorario" | "cancelarHorario" | "informacao",
+  "dataHoraISO": "YYYY-MM-DDTHH:mm:ss-03:00" | null,
+  "servicoNome": "Nome Exato do Serviço" | null
+}
+
+EXEMPLOS:
+- "hoje às 9h" → "2025-09-27T09:00:00-03:00"
+- "amanhã às 14h" → "2025-09-28T14:00:00-03:00"
+
+Retorne APENAS o JSON, nada mais.`
 
     const response = await fetch('https://api.perplexity.ai/chat/completions', {
       method: 'POST',
