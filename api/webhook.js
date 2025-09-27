@@ -257,11 +257,12 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     .doc(barbeariaId)
     .collection(CONFIG.collections.schedules)
   const q = schedulesRef
-    .where('Status', '==', 'Agendado')
     .where('DataHoraISO', '>=', startOfDay.toISOString())
     .where('DataHoraISO', '<=', endOfDay.toISOString())
   const snapshot = await q.get()
-  const busySlots = snapshot.docs.map((doc) => {
+  const busySlots = snapshot.docs
+  .filter(doc => doc.data().Status === 'Agendado')  // FILTRO NO CÓDIGO
+  .map((doc) => {
     const data = doc.data()
     const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone)
     return {
@@ -346,27 +347,36 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
 async function handleCancellation(barbeariaId, personInfo) {
   if (!personInfo.phone)
     return { success: false, message: 'Para cancelar, preciso do seu telefone.', type: null }
+  
   const schedulesRef = db
     .collection(CONFIG.collections.barbearias)
     .doc(barbeariaId)
     .collection(CONFIG.collections.schedules)
+
+  // Query simples apenas por telefone
   const q = schedulesRef
     .where('TelefoneCliente', '==', personInfo.phone)
-    .where('Status', '==', 'Agendado')
     .where('DataHoraISO', '>', new Date().toISOString())
+
   const snapshot = await q.get()
-  if (snapshot.empty)
+  
+  // Filtrar por status no código
+  const activeAppointments = snapshot.docs.filter(doc => doc.data().Status === 'Agendado')
+  
+  if (activeAppointments.length === 0) {
     return {
       success: false,
       message: `Não encontrei nenhum agendamento futuro no seu telefone.`,
       type: null,
     }
+  }
 
   let count = 0
-  for (const doc of snapshot.docs) {
+  for (const doc of activeAppointments) {
     await doc.ref.update({ Status: 'Cancelado' })
     count++
   }
+  
   return {
     success: true,
     message: `Tudo certo! Cancelei ${count} agendamento(s) futuro(s) que encontrei.`,
@@ -379,24 +389,33 @@ async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
   const requestedStart = requestedDate.getTime()
   const requestedEnd = requestedStart + serviceDurationMs
 
-  const searchStart = new Date(requestedStart - 2 * 60 * 60 * 1000)
-  const searchEnd = new Date(requestedStart + 2 * 60 * 60 * 1000)
+  // Buscar todos os agendamentos do dia
+  const dayStart = dayjs(requestedDate).startOf('day').toDate()
+  const dayEnd = dayjs(requestedDate).endOf('day').toDate()
 
   const schedulesRef = db
     .collection(CONFIG.collections.barbearias)
     .doc(barbeariaId)
     .collection(CONFIG.collections.schedules)
+
+  // Query simples - só por data
   const q = schedulesRef
-    .where('Status', '==', 'Agendado')
-    .where('DataHoraISO', '>=', searchStart.toISOString())
-    .where('DataHoraISO', '<=', searchEnd.toISOString())
+    .where('DataHoraISO', '>=', dayStart.toISOString())
+    .where('DataHoraISO', '<=', dayEnd.toISOString())
 
   const snapshot = await q.get()
 
   for (const doc of snapshot.docs) {
     const existingData = doc.data()
+    
+    // Filtro no código em vez da query
+    if (existingData.Status !== 'Agendado') {
+      continue
+    }
+
     const existingStart = new Date(existingData.DataHoraISO).getTime()
     const existingEnd = existingStart + (existingData.duracaoMinutos || 30) * 60 * 1000
+    
     if (requestedStart < existingEnd && requestedEnd > existingStart) {
       return true
     }
