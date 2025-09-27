@@ -119,14 +119,54 @@ app.post("/api/webhook", async (request, response) => {
     console.log("\n📄 === NOVO REQUEST WEBHOOK (Perplexity) ===\n", JSON.stringify(body, null, 2));
 
     try {
-        const { nome, telefone, data_hora_texto, barbeariaId } = body;
+        const { nome, telefone, data_hora_texto, barbeariaId: slugOrId } = body;
         let resultPayload;
 
-        // Validações básicas
-        if (!barbeariaId) {
+        console.log(`🏪 Barbearia recebida: "${slugOrId}"`);
+
+        if (!slugOrId) {
             return response.status(400).json({ 
                 status: 'error', 
                 message: "ID da barbearia não foi fornecido.",
+                type: null 
+            });
+        }
+
+        // Busca a barbearia pelo slug ou pelo ID do documento
+        let barbeariaDocId = null;
+        
+        try {
+            // Primeiro tenta como ID direto (caso seja "01", etc)
+            const directDocRef = db.collection(CONFIG.collections.barbearias).doc(slugOrId);
+            const directDocSnap = await directDocRef.get();
+            
+            if (directDocSnap.exists) {
+                barbeariaDocId = slugOrId;
+                console.log(`✅ Barbearia encontrada por ID direto: ${barbeariaDocId}`);
+            } else {
+                // Se não encontrou, busca pelo campo slug
+                const querySnapshot = await db.collection(CONFIG.collections.barbearias)
+                    .where('slug', '==', slugOrId)
+                    .limit(1)
+                    .get();
+                
+                if (!querySnapshot.empty) {
+                    barbeariaDocId = querySnapshot.docs[0].id;
+                    console.log(`✅ Barbearia encontrada por slug: ${slugOrId} → ID: ${barbeariaDocId}`);
+                } else {
+                    console.log(`❌ Barbearia não encontrada: ${slugOrId}`);
+                    return response.status(200).json({ 
+                        status: 'error', 
+                        message: "Barbearia não encontrada. Verifique o ID/slug informado.",
+                        type: null 
+                    });
+                }
+            }
+        } catch (error) {
+            console.error("❌ Erro ao buscar barbearia:", error);
+            return response.status(500).json({ 
+                status: 'error', 
+                message: "Erro interno ao buscar barbearia.",
                 type: null 
             });
         }
@@ -139,9 +179,9 @@ app.post("/api/webhook", async (request, response) => {
             });
         }
         
-        // Busca serviços
+        // Busca serviços usando o ID real do documento
         const servicesSnapshot = await db.collection(CONFIG.collections.barbearias)
-            .doc(barbeariaId)
+            .doc(barbeariaDocId)
             .collection(CONFIG.collections.services)
             .get();
             
@@ -160,6 +200,18 @@ app.post("/api/webhook", async (request, response) => {
         // Chama a IA
         const aiResult = await getIntentAndDateFromPerplexity(data_hora_texto, servicesList);
         console.log("🤖 Resultado da IA:", aiResult);
+        
+        // DEBUG: Vamos ver todas as configurações de horários
+        console.log("🔍 DEBUG: Listando TODOS os documentos de horários:");
+        const horariosSnapshot = await db.collection(CONFIG.collections.barbearias)
+            .doc(barbeariaId)
+            .collection(CONFIG.collections.config)
+            .get();
+            
+        console.log(`📄 Total de documentos encontrados: ${horariosSnapshot.docs.length}`);
+        horariosSnapshot.docs.forEach(doc => {
+            console.log(`   Documento ID: "${doc.id}" -> Dados:`, doc.data());
+        });
 
         if (!aiResult) {
             return response.status(200).json({ 
@@ -175,7 +227,12 @@ app.post("/api/webhook", async (request, response) => {
             servicesList.find(s => s.nome.toLowerCase() === servicoNome.toLowerCase()) : 
             servicesList[0]; // Usa o primeiro serviço como padrão
 
-        console.log("📅 Data processada:", parsedDate?.format('DD/MM/YYYY HH:mm'));
+        console.log("📅 DEBUG COMPLETO DA DATA:");
+        console.log("   - dataHoraISO recebido da IA:", dataHoraISO);
+        console.log("   - parsedDate após conversão:", parsedDate ? parsedDate.format('DD/MM/YYYY HH:mm dddd') : 'null');
+        console.log("   - parsedDate.day():", parsedDate ? parsedDate.day() : 'null');
+        console.log("   - Timezone configurado:", CONFIG.timezone);
+        console.log("   - Data atual para referência:", dayjs().tz(CONFIG.timezone).format('DD/MM/YYYY HH:mm dddd'));
         console.log("🔧 Serviço encontrado:", servicoEncontrado?.nome);
 
         if (intent === 'agendarHorario') {
@@ -202,7 +259,7 @@ app.post("/api/webhook", async (request, response) => {
                 } else {
                     const dateForStorage = parsedDate.utc().toDate();
                     const personInfo = { name: nome, phone: telefone };
-                    resultPayload = await handleScheduling(barbeariaId, personInfo, dateForStorage, parsedDate, servicoEncontrado.id);
+                    resultPayload = await handleScheduling(barbeariaDocId, personInfo, dateForStorage, parsedDate, servicoEncontrado.id);
                 }
             }
         } else if (intent === 'cancelarHorario') {
@@ -214,7 +271,7 @@ app.post("/api/webhook", async (request, response) => {
                 };
             } else {
                 const personInfo = { phone: telefone };
-                resultPayload = await handleCancellation(barbeariaId, personInfo);
+                resultPayload = await handleCancellation(barbeariaDocId, personInfo);
             }
         } else {
             resultPayload = { 
@@ -358,8 +415,21 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
 // Mantém todas as outras funções iguais (checkBusinessHours, findAvailableSlotsForDay, handleCancellation, checkConflicts, saveAppointment)
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const dayOfWeek = dateDayjs.day();
+    
+    // DEBUG: Vamos ver o que está acontecendo
+    console.log("🔍 DEBUG checkBusinessHours:");
+    console.log("   - Data recebida:", dateDayjs.format('DD/MM/YYYY HH:mm dddd'));
+    console.log("   - Dia da semana (dayjs.day()):", dayOfWeek);
+    console.log("   - Buscando documento:", String(dayOfWeek));
+    
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
+    
+    console.log("   - Documento existe?", docSnap.exists);
+    if (docSnap.exists) {
+        console.log("   - Dados do documento:", docSnap.data());
+    }
+    
     if (!docSnap.exists || !docSnap.data().aberto) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
     
     const dayConfig = docSnap.data();
