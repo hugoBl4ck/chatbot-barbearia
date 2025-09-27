@@ -222,28 +222,45 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
 
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const dayOfWeek = dateDayjs.day();
-    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
+    const docRef = db
+      .collection(CONFIG.collections.barbearias)
+      .doc(barbeariaId)
+      .collection(CONFIG.collections.config)
+      .doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    if (!docSnap.exists() || !docSnap.data().aberto) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
-    
+
+    if (!docSnap.exists || !docSnap.data().aberto) {
+        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    }
+
     const dayConfig = docSnap.data();
-    const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
-    
+    const timeToMinutes = (str) => {
+        if (!str) return null;
+        const [h, m] = str.split(':').map(Number);
+        return (h * 60) + (m || 0);
+    };
+
     const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
-    const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
-    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
     
+    const fitsInMorning = (morningStart !== null && morningEnd !== null) && 
+                         (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
+    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && 
+                           (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+
     if (fitsInMorning || fitsInAfternoon) {
         return { isOpen: true };
     } else {
         const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
         const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
-        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
+        return {
+            isOpen: false,
+            message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.`,
+        };
     }
 }
 
