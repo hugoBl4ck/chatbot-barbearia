@@ -142,27 +142,51 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const dayOfWeek = dateDayjs.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    if (!docSnap.exists || !docSnap.data().aberto) return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+
+    if (!docSnap.exists || !docSnap.data().aberto) {
+        return { isOpen: false, message: `Desculpe, não funcionamos neste dia.` };
+    }
     
     const dayConfig = docSnap.data();
-    const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
     
+    const timeToMinutes = (timeStr) => {
+        if (!timeStr || typeof timeStr !== 'string') return null;
+        const [hours, minutes] = timeStr.split(':').map(Number);
+        return (hours * 60) + (minutes || 0);
+    };
+
     const requestedStartMinutes = dateDayjs.hour() * 60 + dateDayjs.minute();
     const requestedEndMinutes = requestedStartMinutes + duracaoMinutos;
+
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
 
-    const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
-    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+    // --- LÓGICA DE VERIFICAÇÃO CORRIGIDA E FINAL ---
+    const fitsInMorning = (morningStart !== null && morningEnd !== null) &&
+                          (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
+
+    const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) &&
+                            (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
     
+    // --- LOGS DETALHADOS PARA PROVA ---
+    console.log("--- Depurando checkBusinessHours (Lógica Final) ---");
+    console.log(`Horário Solicitado (minutos): ${requestedStartMinutes} -> ${requestedEndMinutes}`);
+    console.log(`Período Manhã (minutos): ${morningStart} -> ${morningEnd}`);
+    console.log(`Período Tarde (minutos): ${afternoonStart} -> ${afternoonEnd}`);
+    console.log(`Cabe na Manhã? ((${requestedStartMinutes} >= ${morningStart}) && (${requestedEndMinutes} <= ${morningEnd})) -> ${fitsInMorning}`);
+    console.log(`Cabe na Tarde? ((${requestedStartMinutes} >= ${afternoonStart}) && (${requestedEndMinutes} <= ${afternoonEnd})) -> ${fitsInAfternoon}`);
+
     if (fitsInMorning || fitsInAfternoon) {
+        console.log("VEREDICTO: Horário VÁLIDO.");
         return { isOpen: true };
     } else {
         const morning = dayConfig.InicioManha ? `das ${dayConfig.InicioManha} às ${dayConfig.FimManha}` : '';
         const afternoon = dayConfig.InicioTarde ? ` e das ${dayConfig.InicioTarde} às ${dayConfig.FimTarde}` : '';
-        return { isOpen: false, message: `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.` };
+        const msg = `Nosso horário de funcionamento é ${morning}${afternoon}. O serviço solicitado não se encaixa nesse período.`;
+        console.log("VEREDICTO: Horário INVÁLIDO.");
+        return { isOpen: false, message: msg };
     }
 }
 
