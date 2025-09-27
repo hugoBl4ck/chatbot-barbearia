@@ -110,9 +110,8 @@ app.post('/api/webhook', async (request, response) => {
       return response.status(200).json({ status: 'error', message: aiResponse.message })
 
     const { intent, dataHoraISO, servicoNome } = aiResponse.data
-    // FIX: A IA retorna a hora local (ex: 9:00) mas anexa 'Z', tratando-a como UTC.
-    // A correção abaixo remove o 'Z' e trata a string como sendo do fuso horário local correto.
-    const parsedDate = dataHoraISO ? dayjs.tz(dataHoraISO.substring(0, 19), CONFIG.timezone) : null
+    
+    const parsedDate = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null
 
     let resultPayload
     const personInfo = { name: nome, phone: telefone }
