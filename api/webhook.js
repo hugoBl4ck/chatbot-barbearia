@@ -53,7 +53,10 @@ async function getIntentWithPerplexity(text, servicesList) {
         - Para agendamentos, SEMPRE inclua dataHoraISO no formato ISO com timezone brasileiro (-03:00)
         - Se o usuário não especificar um serviço específico, use null em servicoNome
         - Se algo não for claro, retorne null nos campos correspondentes
-        - Seja preciso com a data e hora no fuso brasileiro`;
+        - Seja preciso com a data e hora no fuso brasileiro
+        - Caso o usuário use apenas o termo "corte" (sem especificar barba ou cabelo), interprete como **"Corte de Cabelo"**.
+        - Se o usuário mencionar "barba", "corte de barba", "fazer a barba", então associe com **"Corte de Barba"**.
+        - Se mencionar "sobrancelha", "combo", "cabelo e barba = combo" ou outros termos, associe ao serviço correspondente mais próximo disponível na lista.`;
         
         const response = await fetch("https://api.perplexity.ai/chat/completions", {
             method: 'POST',
