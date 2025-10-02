@@ -370,80 +370,55 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const dayOfWeek = dayDate.day();
-    const docRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection(CONFIG.collections.config)
-        .doc(String(dayOfWeek));
+    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
     
-    if (!docSnap.exists || !docSnap.data().aberto) {
-        return [];
-    }
+    if (!docSnap.exists || !docSnap.data().aberto) return [];
     
     const dayConfig = docSnap.data();
-    
-    const timeToMinutes = (str) => { 
-        if (!str) return null; 
-        const [h, m] = str.split(':').map(Number); 
-        return (h * 60) + (m || 0); 
-    };
-    
-    const formatTime = (totalMinutes) => 
-        `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
-    
+    const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
+    const formatTime = (totalMinutes) => `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
+
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
     
-    // Buscar agendamentos existentes
     const startOfDay = dayDate.startOf('day').toDate();
     const endOfDay = dayDate.endOf('day').toDate();
-    const schedulesRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection(CONFIG.collections.schedules);
-    
-    const snapshot = await schedulesRef
-        .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', startOfDay.toISOString())
-        .where('DataHoraISO', '<=', endOfDay.toISOString())
-        .get();
-    
+    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
+    const q = schedulesRef.where('Status', '==', 'Agendado').where('DataHoraISO', '>=', startOfDay.toISOString()).where('DataHoraISO', '<=', endOfDay.toISOString());
+    const snapshot = await q.get();
     const busySlots = snapshot.docs.map(doc => {
         const data = doc.data();
         const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
-        return { 
-            start: startTime.hour() * 60 + startTime.minute(), 
-            end: startTime.hour() * 60 + startTime.minute() + (data.duracaoMinutos || 30) 
-        };
+        return { start: startTime.hour() * 60 + startTime.minute(), end: startTime.hour() * 60 + startTime.minute() + data.duracaoMinutos };
     });
     
     const availableSlots = [];
-    const currentTime = dayjs().tz(CONFIG.timezone);
-    const isToday = dayDate.isSame(currentTime, 'day');
+    const currentTime = dayjs().tz(CONFIG.timezone); // Pega a hora atual com fuso
     
     const addSlotsFromPeriod = (start, end) => {
         if (start === null || end === null) return;
         
-        // Intervalos de 15 minutos
         for (let time = start; time + duracaoMinutos <= end; time += 15) {
             const slotDate = dayDate.hour(Math.floor(time / 60)).minute(time % 60);
             
-            // Se for hoje, não incluir horários no passado
-            if (isToday && slotDate.isBefore(currentTime)) continue;
+            // =========================================================
+            // LÓGICA DE VERIFICAÇÃO CORRIGIDA
+            // =========================================================
+            // Se a data do slot for anterior à data/hora atual, pule.
+            if (slotDate.isBefore(currentTime)) {
+                continue;
+            }
             
-            // Verificar se há conflito com agendamentos existentes
-            const hasConflict = busySlots.some(busy => 
-                (time < busy.end && (time + duracaoMinutos) > busy.start)
-            );
-            
+            const hasConflict = busySlots.some(busy => (time < busy.end && (time + duracaoMinutos) > busy.start));
             if (!hasConflict) {
-                availableSlots.push(formatTime(time));
+                availableSlots.push(slotDate.format('HH:mm'));
             }
         }
     };
     
-    // Adicionar slots da manhã e tarde
     addSlotsFromPeriod(morningStart, morningEnd);
     addSlotsFromPeriod(afternoonStart, afternoonEnd);
     
