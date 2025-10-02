@@ -350,22 +350,40 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
 }
 
 async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
-    const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
-    
-    // Tentar encontrar slots no mesmo dia
-    let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
-    if (availableSlots.length > 0) {
-        return `O horário solicitado está ocupado. 😔\nMas tenho estes horários livres hoje: ${availableSlots.slice(0, 3).join(', ')}.`;
+    try {
+        // Usa o objeto Date recebido, que já está correto
+        const requestedDateDayjs = dayjs(requestedDate);
+
+        // =========================================================
+        // LÓGICA CORRIGIDA
+        // =========================================================
+        
+        // 1. Tenta encontrar vagas no MESMO dia que o usuário pediu
+        let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = requestedDateDayjs.isSame(dayjs(), 'day') ? 'hoje' : `no dia ${requestedDateDayjs.format('DD/MM')}`;
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `O horário solicitado está ocupado. 😔\nMas tenho estes horários livres ${dateStr}: ${slotsText}. Algum desses funciona?`;
+        }
+        
+        // 2. Se não encontrou, tenta para o DIA SEGUINTE
+        const tomorrow = requestedDateDayjs.add(1, 'day');
+        availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
+        
+        if (availableSlots.length > 0) {
+            const dateStr = tomorrow.format('DD/MM');
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `Não tenho mais vagas para este dia. 😔\nPara o dia seguinte (${dateStr}), tenho estes horários: ${slotsText}. Quer marcar um desses?`;
+        }
+        
+        // 3. Se ainda não encontrou, desiste educadamente.
+        return "Este horário já está ocupado e não encontrei outras vagas próximas. 😔 Por favor, tente outro dia.";
+        
+    } catch (error) {
+        console.error("❌ Erro ao buscar horários disponíveis:", error);
+        return "Este horário está ocupado. Tente outro ou entre em contato conosco.";
     }
-    
-    // Tentar amanhã
-    const tomorrow = requestedDateDayjs.add(1, 'day');
-    availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
-    if (availableSlots.length > 0) {
-        return `Não tenho mais vagas para hoje. 😔\nPara amanhã, tenho estes horários: ${availableSlots.slice(0, 3).join(', ')}.`;
-    }
-    
-    return "Este horário já está ocupado e não encontrei outras vagas próximas. 😔";
 }
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
