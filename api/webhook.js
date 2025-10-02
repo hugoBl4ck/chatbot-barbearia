@@ -522,7 +522,22 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos, tel
 }
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
-    // Garante que dayDate seja tratado no fuso da barbearia
+    // helper: normaliza DataHoraISO para dayjs no timezone da barbearia
+    const parseDataHoraIsoToTz = (raw) => {
+        if (!raw) return null;
+        // Firestore Timestamp
+        if (typeof raw === 'object' && typeof raw.toDate === 'function') {
+            return dayjs(raw.toDate()).tz(CONFIG.timezone);
+        }
+        // número (ms)
+        if (typeof raw === 'number') {
+            return dayjs(raw).tz(CONFIG.timezone);
+        }
+        // string -> interpretar como UTC e converter para o TZ da barbearia
+        return dayjs.utc(String(raw)).tz(CONFIG.timezone);
+    };
+
+    // garante dayDate no timezone correto
     const dayDateTz = dayjs(dayDate).tz(CONFIG.timezone);
     const dayOfWeek = dayDateTz.day();
 
@@ -534,14 +549,13 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     if (!docSnap.exists || !docSnap.data().aberto) return [];
 
     const dayConfig = docSnap.data();
-
-    const timeToMinutes = (str) => { 
-        if (!str) return null; 
-        const [h, m] = String(str).split(':').map(Number); 
-        return (h * 60) + (m || 0); 
+    const timeToMinutes = (str) => {
+        if (!str) return null;
+        const [h, m] = String(str).split(':').map(Number);
+        return (h * 60) + (m || 0);
     };
 
-    // Períodos de trabalho (em minutos desde 00:00)
+    // períodos de trabalho (minutos desde 00:00)
     const workPeriods = [];
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
@@ -551,64 +565,57 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
     if (afternoonStart !== null && afternoonEnd !== null) workPeriods.push({ start: afternoonStart, end: afternoonEnd });
 
-    // Agendamentos existentes (usa o dia completo já no fuso correto)
-    const startOfDay = dayDateTz.startOf('day').toDate().toISOString();
-    const endOfDay = dayDateTz.endOf('day').toDate().toISOString();
+    // buscar agendamentos do dia (usa limites calculados com dayDateTz)
+    const startOfDayIso = dayDateTz.startOf('day').toISOString();
+    const endOfDayIso = dayDateTz.endOf('day').toISOString();
+
     const schedulesRef = db.collection(CONFIG.collections.barbearias)
         .doc(barbeariaId)
         .collection(CONFIG.collections.schedules);
 
     const snapshot = await schedulesRef
         .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', startOfDay)
-        .where('DataHoraISO', '<=', endOfDay)
+        .where('DataHoraISO', '>=', startOfDayIso)
+        .where('DataHoraISO', '<=', endOfDayIso)
         .get();
 
-    // busySlots com timestamps completos (ms)
-    const busySlots = snapshot.docs.map(doc => {
+    // construir busySlots com timestamps (ms)
+    const busySlots = [];
+    for (const doc of snapshot.docs) {
         const data = doc.data();
-        // Suporta tanto string ISO quanto Firestore Timestamp
-        let startTime;
-        if (data.DataHoraISO && typeof data.DataHoraISO === 'object' && typeof data.DataHoraISO.toDate === 'function') {
-            startTime = dayjs(data.DataHoraISO.toDate()).tz(CONFIG.timezone);
-        } else {
-            startTime = dayjs(String(data.DataHoraISO)).tz(CONFIG.timezone);
-        }
+        const startDJ = parseDataHoraIsoToTz(data.DataHoraISO);
+        if (!startDJ || !startDJ.isValid()) continue;
         const duration = Number(data.duracaoMinutos || data.duracao || 30);
-        return {
-            start: startTime.valueOf(),
-            end: startTime.add(duration, 'minute').valueOf()
-        };
-    });
+        busySlots.push({
+            startMs: startDJ.valueOf(),
+            endMs: startDJ.add(duration, 'minute').valueOf()
+        });
+    }
 
     const availableSlots = [];
-    const currentTime = dayjs().tz(CONFIG.timezone);
+    const now = dayjs().tz(CONFIG.timezone);
     const INTERVALO_MINUTOS = 30;
 
-    // Para cada período de trabalho, gera slots baseados no início do dia + minuto
     for (const period of workPeriods) {
         for (let minuto = period.start; minuto + duracaoMinutos <= period.end; minuto += INTERVALO_MINUTOS) {
-            // Cria slot com data completa garantindo fuso (usa startOf('day') + minutos)
-            const slotDate = dayDateTz.startOf('day').add(minuto, 'minute').second(0);
-            const slotStart = slotDate.valueOf();
-            const slotEnd = slotDate.add(duracaoMinutos, 'minute').valueOf();
+            const slotDJ = dayDateTz.startOf('day').add(minuto, 'minute').second(0);
+            if (slotDJ.isBefore(now)) continue;
 
-            // Ignora slots no passado
-            if (slotDate.isBefore(currentTime)) continue;
+            const slotStartMs = slotDJ.valueOf();
+            const slotEndMs = slotDJ.add(duracaoMinutos, 'minute').valueOf();
 
-            // Verifica conflito real usando timestamps completos
-            const hasConflict = busySlots.some(busy =>
-                (slotStart < busy.end && slotEnd > busy.start)
-            );
-
+            // conflito real (timestamps)
+            const hasConflict = busySlots.some(bs => (slotStartMs < bs.endMs && slotEndMs > bs.startMs));
             if (!hasConflict) {
-                availableSlots.push(slotDate.format('HH:mm'));
+                availableSlots.push(slotDJ.format('HH:mm'));
             }
         }
     }
 
-    console.log(`✅ Vagas encontradas para ${dayDateTz.format('DD/MM')}: ${availableSlots.join(', ')}`);
-    return availableSlots;
+    // garantir únicos e ordenados
+    const unique = [...new Set(availableSlots)];
+    console.log(`✅ Vagas encontradas para ${dayDateTz.format('DD/MM')}: ${unique.join(', ')}`);
+    return unique;
 }
 
 async function handleCancellation(barbeariaId, personInfo) {
@@ -656,40 +663,55 @@ async function handleCancellation(barbeariaId, personInfo) {
 }
 
 async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
-    const serviceDurationMs = duracaoMinutos * 60 * 1000;
-    const requestedStart = requestedDate.getTime();
-    const requestedEnd = requestedStart + serviceDurationMs;
-    
-    // Buscar agendamentos em um período mais amplo para garantir
-    const searchStart = new Date(requestedStart - (2 * 60 * 60 * 1000));
-    const searchEnd = new Date(requestedStart + (2 * 60 * 60 * 1000));
-    
+    // helper: normaliza DataHoraISO para dayjs no timezone da barbearia
+    const parseDataHoraIsoToTz = (raw) => {
+        if (!raw) return null;
+        // Firestore Timestamp
+        if (typeof raw === 'object' && typeof raw.toDate === 'function') {
+            return dayjs(raw.toDate()).tz(CONFIG.timezone);
+        }
+        // número (ms)
+        if (typeof raw === 'number') {
+            return dayjs(raw).tz(CONFIG.timezone);
+        }
+        // string -> interpretar como UTC e converter para o TZ da barbearia
+        return dayjs.utc(String(raw)).tz(CONFIG.timezone);
+    };
+
+    const requestedStart = dayjs(requestedDate).tz(CONFIG.timezone);
+    const requestedEnd = requestedStart.add(duracaoMinutos, "minute");
+
+    // Buscar agendamentos em uma janela (±2h para reduzir consultas muito largas)
+    const searchStart = requestedStart.subtract(2, "hour").toISOString();
+    const searchEnd = requestedStart.add(2, "hour").toISOString();
+
     const schedulesRef = db.collection(CONFIG.collections.barbearias)
         .doc(barbeariaId)
         .collection(CONFIG.collections.schedules);
-    
+
     const snapshot = await schedulesRef
-        .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', searchStart.toISOString())
-        .where('DataHoraISO', '<=', searchEnd.toISOString())
+        .where("Status", "==", "Agendado")
+        .where("DataHoraISO", ">=", searchStart)
+        .where("DataHoraISO", "<=", searchEnd)
         .get();
-    
+
     for (const doc of snapshot.docs) {
-        const existingData = doc.data();
-        const existingStart = new Date(existingData.DataHoraISO).getTime();
-        const existingDuration = existingData.duracaoMinutos || 30;
-        const existingEnd = existingStart + (existingDuration * 60 * 1000);
-        
-        // Verificar sobreposição
-        if (requestedStart < existingEnd && requestedEnd > existingStart) {
+        const data = doc.data();
+        const existingStartDJ = parseDataHoraIsoToTz(data.DataHoraISO);
+        if (!existingStartDJ || !existingStartDJ.isValid()) continue;
+
+        const existingEndDJ = existingStartDJ.add(data.duracaoMinutos || 30, "minute");
+
+        // Verificar sobreposição usando timestamps consistentes
+        if (requestedStart.isBefore(existingEndDJ) && requestedEnd.isAfter(existingStartDJ)) {
             console.log(`⚠️ Conflito detectado com agendamento existente:`, {
-                existing: { start: new Date(existingStart), end: new Date(existingEnd) },
-                requested: { start: new Date(requestedStart), end: new Date(requestedEnd) }
+                existing: { start: existingStartDJ.toISOString(), end: existingEndDJ.toISOString() },
+                requested: { start: requestedStart.toISOString(), end: requestedEnd.toISOString() }
             });
             return true;
         }
     }
-    
+
     return false;
 }
 
