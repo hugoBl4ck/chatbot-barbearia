@@ -335,7 +335,8 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
     const hasConflict = await checkConflicts(barbeariaId, requestedDateDayjs.toDate(), duracao);
     if (hasConflict) {
         // SALVAR CONTEXTO APENAS quando houver conflito
-        await saveUserContext(barbeariaId, telefone, servico.id, servico.nome, requestedDateDayjs.format('YYYY-MM-DD'));
+        // CORREÇÃO: Salvar o início do dia como um objeto Date para evitar problemas de fuso.
+        await saveUserContext(barbeariaId, telefone, servico.id, servico.nome, requestedDateDayjs.startOf('day').toDate());
 
         const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao, telefone);
         return { success: false, type: 'suggestion', message: suggestions };
