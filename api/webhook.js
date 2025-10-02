@@ -390,56 +390,58 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const dayOfWeek = dayDate.day();
     const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    
     if (!docSnap.exists || !docSnap.data().aberto) return [];
-    
+
     const dayConfig = docSnap.data();
     const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
     const formatTime = (totalMinutes) => `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
 
+    // Períodos de trabalho
+    const workPeriods = [];
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
+    if (morningStart !== null && morningEnd !== null) workPeriods.push({ start: morningStart, end: morningEnd });
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
+    if (afternoonStart !== null && afternoonEnd !== null) workPeriods.push({ start: afternoonStart, end: afternoonEnd });
     
+    // Agendamentos existentes
     const startOfDay = dayDate.startOf('day').toDate();
     const endOfDay = dayDate.endOf('day').toDate();
     const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
-    const q = schedulesRef.where('Status', '==', 'Agendado').where('DataHoraISO', '>=', startOfDay.toISOString()).where('DataHoraISO', '<=', endOfDay.toISOString());
+    const q = query(schedulesRef, where('Status', '==', 'Agendado'), where('DataHoraISO', '>=', startOfDay.toISOString()), where('DataHoraISO', '<=', endOfDay.toISOString()));
     const snapshot = await q.get();
     const busySlots = snapshot.docs.map(doc => {
         const data = doc.data();
         const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
         return { start: startTime.hour() * 60 + startTime.minute(), end: startTime.hour() * 60 + startTime.minute() + data.duracaoMinutos };
     });
-    
+
     const availableSlots = [];
-    const currentTime = dayjs().tz(CONFIG.timezone); // Pega a hora atual com fuso
-    
-    const addSlotsFromPeriod = (start, end) => {
-        if (start === null || end === null) return;
-        
-        for (let time = start; time + duracaoMinutos <= end; time += 15) {
-            const slotDate = dayDate.hour(Math.floor(time / 60)).minute(time % 60);
-            
-            // =========================================================
-            // LÓGICA DE VERIFICAÇÃO CORRIGIDA
-            // =========================================================
-            // Se a data do slot for anterior à data/hora atual, pule.
-            if (slotDate.isBefore(currentTime)) {
-                continue;
-            }
-            
-            const hasConflict = busySlots.some(busy => (time < busy.end && (time + duracaoMinutos) > busy.start));
+    const currentTime = dayjs().tz(CONFIG.timezone);
+    const INTERVALO_MINUTOS = 30; // Gera slots a cada 30 minutos
+
+    for (const period of workPeriods) {
+        for (let minuto = period.start; minuto + duracaoMinutos <= period.end; minuto += INTERVALO_MINUTOS) {
+            const slotStartTime = minuto;
+            const slotEndTime = minuto + duracaoMinutos;
+            const slotDate = dayDate.hour(Math.floor(minuto / 60)).minute(minuto % 60);
+
+            // 1. Verifica se o slot já passou
+            if (slotDate.isBefore(currentTime)) continue;
+
+            // 2. Verifica se o slot se choca com algum agendamento
+            const hasConflict = busySlots.some(busy => 
+                (slotStartTime < busy.end && slotEndTime > busy.start)
+            );
+
             if (!hasConflict) {
-                availableSlots.push(slotDate.format('HH:mm'));
+                availableSlots.push(formatTime(minuto));
             }
         }
-    };
+    }
     
-    addSlotsFromPeriod(morningStart, morningEnd);
-    addSlotsFromPeriod(afternoonStart, afternoonEnd);
-    
+    console.log(`✅ Vagas encontradas para ${dayDate.format('DD/MM')}: ${availableSlots.join(', ')}`);
     return availableSlots;
 }
 
