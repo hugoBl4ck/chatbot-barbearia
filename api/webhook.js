@@ -522,56 +522,62 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos, tel
 }
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
-    const dayOfWeek = dayDate.day();
+    // Garante que dayDate seja tratado no fuso da barbearia
+    const dayDateTz = dayjs(dayDate).tz(CONFIG.timezone);
+    const dayOfWeek = dayDateTz.day();
+
     const docRef = db.collection(CONFIG.collections.barbearias)
         .doc(barbeariaId)
         .collection(CONFIG.collections.config)
         .doc(String(dayOfWeek));
     const docSnap = await docRef.get();
-    
     if (!docSnap.exists || !docSnap.data().aberto) return [];
 
     const dayConfig = docSnap.data();
 
     const timeToMinutes = (str) => { 
         if (!str) return null; 
-        const [h, m] = str.split(':').map(Number); 
+        const [h, m] = String(str).split(':').map(Number); 
         return (h * 60) + (m || 0); 
     };
-    const formatTime = (dateObj) => dateObj.format("HH:mm");
 
-    // Períodos de trabalho
+    // Períodos de trabalho (em minutos desde 00:00)
     const workPeriods = [];
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
-    if (morningStart !== null && morningEnd !== null) {
-        workPeriods.push({ start: morningStart, end: morningEnd });
-    }
+    if (morningStart !== null && morningEnd !== null) workPeriods.push({ start: morningStart, end: morningEnd });
+
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
-    if (afternoonStart !== null && afternoonEnd !== null) {
-        workPeriods.push({ start: afternoonStart, end: afternoonEnd });
-    }
-    
-    // Agendamentos existentes no dia
-    const startOfDay = dayDate.startOf('day').toDate();
-    const endOfDay = dayDate.endOf('day').toDate();
+    if (afternoonStart !== null && afternoonEnd !== null) workPeriods.push({ start: afternoonStart, end: afternoonEnd });
+
+    // Agendamentos existentes (usa o dia completo já no fuso correto)
+    const startOfDay = dayDateTz.startOf('day').toDate().toISOString();
+    const endOfDay = dayDateTz.endOf('day').toDate().toISOString();
     const schedulesRef = db.collection(CONFIG.collections.barbearias)
         .doc(barbeariaId)
         .collection(CONFIG.collections.schedules);
-    
+
     const snapshot = await schedulesRef
         .where('Status', '==', 'Agendado')
-        .where('DataHoraISO', '>=', startOfDay.toISOString())
-        .where('DataHoraISO', '<=', endOfDay.toISOString())
+        .where('DataHoraISO', '>=', startOfDay)
+        .where('DataHoraISO', '<=', endOfDay)
         .get();
-    
+
+    // busySlots com timestamps completos (ms)
     const busySlots = snapshot.docs.map(doc => {
         const data = doc.data();
-        const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
-        return { 
-            start: startTime.valueOf(), 
-            end: startTime.add(data.duracaoMinutos || 30, 'minute').valueOf()
+        // Suporta tanto string ISO quanto Firestore Timestamp
+        let startTime;
+        if (data.DataHoraISO && typeof data.DataHoraISO === 'object' && typeof data.DataHoraISO.toDate === 'function') {
+            startTime = dayjs(data.DataHoraISO.toDate()).tz(CONFIG.timezone);
+        } else {
+            startTime = dayjs(String(data.DataHoraISO)).tz(CONFIG.timezone);
+        }
+        const duration = Number(data.duracaoMinutos || data.duracao || 30);
+        return {
+            start: startTime.valueOf(),
+            end: startTime.add(duration, 'minute').valueOf()
         };
     });
 
@@ -579,27 +585,29 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const currentTime = dayjs().tz(CONFIG.timezone);
     const INTERVALO_MINUTOS = 30;
 
+    // Para cada período de trabalho, gera slots baseados no início do dia + minuto
     for (const period of workPeriods) {
         for (let minuto = period.start; minuto + duracaoMinutos <= period.end; minuto += INTERVALO_MINUTOS) {
-            const slotDate = dayDate.hour(Math.floor(minuto / 60)).minute(minuto % 60).second(0);
+            // Cria slot com data completa garantindo fuso (usa startOf('day') + minutos)
+            const slotDate = dayDateTz.startOf('day').add(minuto, 'minute').second(0);
             const slotStart = slotDate.valueOf();
             const slotEnd = slotDate.add(duracaoMinutos, 'minute').valueOf();
 
-            // 1. Ignora se o slot já passou
+            // Ignora slots no passado
             if (slotDate.isBefore(currentTime)) continue;
 
-            // 2. Verifica conflito real (timestamps completos)
-            const hasConflict = busySlots.some(busy => 
+            // Verifica conflito real usando timestamps completos
+            const hasConflict = busySlots.some(busy =>
                 (slotStart < busy.end && slotEnd > busy.start)
             );
 
             if (!hasConflict) {
-                availableSlots.push(formatTime(slotDate));
+                availableSlots.push(slotDate.format('HH:mm'));
             }
         }
     }
-    
-    console.log(`✅ Vagas encontradas para ${dayDate.format('DD/MM')}: ${availableSlots.join(', ')}`);
+
+    console.log(`✅ Vagas encontradas para ${dayDateTz.format('DD/MM')}: ${availableSlots.join(', ')}`);
     return availableSlots;
 }
 
