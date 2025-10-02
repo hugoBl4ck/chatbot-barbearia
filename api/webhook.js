@@ -662,28 +662,31 @@ async function handleCancellation(barbeariaId, personInfo) {
     };
 }
 
-async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
-    // helper: normaliza DataHoraISO para dayjs no timezone da barbearia
-    const parseDataHoraIsoToTz = (raw) => {
-        if (!raw) return null;
-        // Firestore Timestamp
-        if (typeof raw === 'object' && typeof raw.toDate === 'function') {
-            return dayjs(raw.toDate()).tz(CONFIG.timezone);
-        }
-        // número (ms)
-        if (typeof raw === 'number') {
-            return dayjs(raw).tz(CONFIG.timezone);
-        }
-        // string -> interpretar como UTC e converter para o TZ da barbearia
-        return dayjs.utc(String(raw)).tz(CONFIG.timezone);
-    };
+// Helper global para normalizar DataHoraISO
+function parseDataHoraIsoToTz(raw) {
+    if (!raw) return null;
 
+    // Firestore Timestamp
+    if (typeof raw === "object" && typeof raw.toDate === "function") {
+        return dayjs(raw.toDate()).tz(CONFIG.timezone);
+    }
+
+    // Number (ms)
+    if (typeof raw === "number") {
+        return dayjs(raw).tz(CONFIG.timezone);
+    }
+
+    // String ISO -> interpretar como UTC e converter para timezone
+    return dayjs.utc(String(raw)).tz(CONFIG.timezone);
+}
+
+async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
     const requestedStart = dayjs(requestedDate).tz(CONFIG.timezone);
     const requestedEnd = requestedStart.add(duracaoMinutos, "minute");
 
-    // Buscar agendamentos em uma janela (±2h para reduzir consultas muito largas)
-    const searchStart = requestedStart.subtract(2, "hour").toISOString();
-    const searchEnd = requestedStart.add(2, "hour").toISOString();
+    // Buscar agendamentos em uma janela +-2h no mesmo dia
+    const searchStart = requestedStart.subtract(2, "hour").toDate();
+    const searchEnd = requestedStart.add(2, "hour").toDate();
 
     const schedulesRef = db.collection(CONFIG.collections.barbearias)
         .doc(barbeariaId)
@@ -702,7 +705,7 @@ async function checkConflicts(barbeariaId, requestedDate, duracaoMinutos) {
 
         const existingEndDJ = existingStartDJ.add(data.duracaoMinutos || 30, "minute");
 
-        // Verificar sobreposição usando timestamps consistentes
+        // Verificar sobreposição
         if (requestedStart.isBefore(existingEndDJ) && requestedEnd.isAfter(existingStartDJ)) {
             console.log(`⚠️ Conflito detectado com agendamento existente:`, {
                 existing: { start: existingStartDJ.toISOString(), end: existingEndDJ.toISOString() },
