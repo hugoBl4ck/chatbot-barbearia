@@ -388,33 +388,55 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const dayOfWeek = dayDate.day();
-    const docRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.config).doc(String(dayOfWeek));
+    const docRef = db.collection(CONFIG.collections.barbearias)
+        .doc(barbeariaId)
+        .collection(CONFIG.collections.config)
+        .doc(String(dayOfWeek));
     const docSnap = await docRef.get();
+    
     if (!docSnap.exists || !docSnap.data().aberto) return [];
 
     const dayConfig = docSnap.data();
-    const timeToMinutes = (str) => { if (!str) return null; const [h, m] = str.split(':').map(Number); return (h * 60) + (m || 0); };
+    const timeToMinutes = (str) => { 
+        if (!str) return null; 
+        const [h, m] = str.split(':').map(Number); 
+        return (h * 60) + (m || 0); 
+    };
     const formatTime = (totalMinutes) => `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
 
     // Períodos de trabalho
     const workPeriods = [];
     const morningStart = timeToMinutes(dayConfig.InicioManha);
     const morningEnd = timeToMinutes(dayConfig.FimManha);
-    if (morningStart !== null && morningEnd !== null) workPeriods.push({ start: morningStart, end: morningEnd });
+    if (morningStart !== null && morningEnd !== null) {
+        workPeriods.push({ start: morningStart, end: morningEnd });
+    }
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
-    if (afternoonStart !== null && afternoonEnd !== null) workPeriods.push({ start: afternoonStart, end: afternoonEnd });
+    if (afternoonStart !== null && afternoonEnd !== null) {
+        workPeriods.push({ start: afternoonStart, end: afternoonEnd });
+    }
     
     // Agendamentos existentes
     const startOfDay = dayDate.startOf('day').toDate();
     const endOfDay = dayDate.endOf('day').toDate();
-    const schedulesRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection(CONFIG.collections.schedules);
-    const q = query(schedulesRef, where('Status', '==', 'Agendado'), where('DataHoraISO', '>=', startOfDay.toISOString()), where('DataHoraISO', '<=', endOfDay.toISOString()));
-    const snapshot = await q.get();
+    const schedulesRef = db.collection(CONFIG.collections.barbearias)
+        .doc(barbeariaId)
+        .collection(CONFIG.collections.schedules);
+    
+    const snapshot = await schedulesRef
+        .where('Status', '==', 'Agendado')
+        .where('DataHoraISO', '>=', startOfDay.toISOString())
+        .where('DataHoraISO', '<=', endOfDay.toISOString())
+        .get();
+    
     const busySlots = snapshot.docs.map(doc => {
         const data = doc.data();
         const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
-        return { start: startTime.hour() * 60 + startTime.minute(), end: startTime.hour() * 60 + startTime.minute() + data.duracaoMinutos };
+        return { 
+            start: startTime.hour() * 60 + startTime.minute(), 
+            end: startTime.hour() * 60 + startTime.minute() + (data.duracaoMinutos || 30)
+        };
     });
 
     const availableSlots = [];
