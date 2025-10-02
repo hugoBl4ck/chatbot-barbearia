@@ -226,7 +226,7 @@ app.post("/api/webhook", async (request, response) => {
             console.log(`🔄 Usando serviço do contexto: ${servicoNome}`);
         }
         
-        const parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
+        let parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
         const personInfo = { name: nome, phone: telefone };
 
         let resultPayload;
