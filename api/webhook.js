@@ -46,11 +46,12 @@ async function saveUserContext(barbeariaId, telefone, servicoId, servicoNome, da
         servicoId,
         servicoNome,
         dataOriginal,
+        dataSugerida: dataOriginal, // Adiciona a data que foi sugerida ao usuário
         criadoEm: new Date().toISOString(),
         expirarEm: new Date(Date.now() + 10 * 60 * 1000).toISOString()
     });
     
-    console.log(`💾 Contexto salvo para ${telefone}: ${servicoNome}`);
+    console.log(`💾 Contexto salvo para ${telefone}: ${servicoNome} (Data sugerida: ${dataOriginal})`);
 }
 
 async function getUserContext(barbeariaId, telefone) {
@@ -76,7 +77,7 @@ async function getUserContext(barbeariaId, telefone) {
         return null;
     }
     
-    console.log(`📬 Contexto recuperado para ${telefone}: ${context.servicoNome}`);
+    console.log(`📬 Contexto recuperado para ${telefone}: ${context.servicoNome} (Data: ${context.dataSugerida})`);
     return context;
 }
 
@@ -237,6 +238,24 @@ app.post("/api/webhook", async (request, response) => {
                     message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'hoje às 14h30'." 
                 };
             } else {
+                // SE TEM CONTEXTO E A IA SÓ RETORNOU HORÁRIO (sem data específica), 
+                // USA A DATA DO CONTEXTO
+                if (userContext && userContext.dataSugerida) {
+                    const contextDate = dayjs(userContext.dataSugerida);
+                    const aiTime = parsedDateDayjs;
+                    
+                    // Se a data da IA é hoje e temos uma data sugerida diferente, usa a data sugerida
+                    const today = dayjs().tz(CONFIG.timezone).startOf('day');
+                    if (aiTime.startOf('day').isSame(today, 'day') && !contextDate.isSame(today, 'day')) {
+                        // Combina a data do contexto com o horário da IA
+                        parsedDateDayjs = contextDate
+                            .hour(aiTime.hour())
+                            .minute(aiTime.minute())
+                            .second(0);
+                        console.log(`🔄 Usando data do contexto: ${parsedDateDayjs.format('YYYY-MM-DD HH:mm')}`);
+                    }
+                }
+                
                 // Encontrar o serviço
                 let servicoEncontrado;
                 if (servicoNome) {
@@ -264,9 +283,9 @@ app.post("/api/webhook", async (request, response) => {
                     };
                 } else {
                     // SALVAR CONTEXTO ANTES DE TENTAR AGENDAR
-                    await saveUserContext(barbeariaId, telefone, servicoEncontrado.id, servicoEncontrado.nome, parsedDateDayjs.toISOString());
+                    await saveUserContext(barbeariaId, telefone, servicoEncontrado.id, servicoEncontrado.nome, parsedDateDayjs.format('YYYY-MM-DD'));
                     
-                    resultPayload = await handleScheduling(barbeariaId, personInfo, parsedDateDayjs, servicoEncontrado.id);
+                    resultPayload = await handleScheduling(barbeariaId, personInfo, parsedDateDayjs, servicoEncontrado.id, telefone);
                     
                     // SE AGENDAMENTO FOI SUCESSO, LIMPAR CONTEXTO
                     if (resultPayload.success) {
@@ -307,7 +326,7 @@ app.post("/api/webhook", async (request, response) => {
 // FUNÇÕES DE AGENDAMENTO
 // =================================================================
     
-async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, servicoId) {
+async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, servicoId, telefone) {
     if (!personInfo.name || !personInfo.phone) {
         return { 
             success: false, 
@@ -352,7 +371,7 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
     // Verificar conflitos
     const hasConflict = await checkConflicts(barbeariaId, requestedDateDayjs.toDate(), duracao);
     if (hasConflict) {
-        const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao);
+        const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao, telefone);
         return { success: false, type: 'suggestion', message: suggestions };
     }
 
@@ -444,7 +463,7 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     }
 }
 
-async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos, telefone) {
     try {
         const requestedDateDayjs = dayjs(requestedDate);
 
@@ -454,6 +473,19 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
         if (availableSlots.length > 0) {
             const dateStr = requestedDateDayjs.isSame(dayjs(), 'day') ? 'hoje' : `no dia ${requestedDateDayjs.format('DD/MM')}`;
             const slotsText = availableSlots.slice(0, 3).join(', ');
+            
+            // SALVAR A DATA SUGERIDA NO CONTEXTO
+            const userContext = await getUserContext(barbeariaId, telefone);
+            if (userContext) {
+                await saveUserContext(
+                    barbeariaId, 
+                    telefone, 
+                    userContext.servicoId, 
+                    userContext.servicoNome, 
+                    requestedDateDayjs.format('YYYY-MM-DD') // Salva só a data
+                );
+            }
+            
             return `O horário solicitado está ocupado. 😓\nMas tenho estes horários livres ${dateStr}: ${slotsText}.\n\n💡 Escolha um dos horários acima.`;
         }
         
@@ -464,6 +496,19 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
         if (availableSlots.length > 0) {
             const dateStr = tomorrow.format('DD/MM');
             const slotsText = availableSlots.slice(0, 3).join(', ');
+            
+            // SALVAR A DATA SUGERIDA NO CONTEXTO
+            const userContext = await getUserContext(barbeariaId, telefone);
+            if (userContext) {
+                await saveUserContext(
+                    barbeariaId, 
+                    telefone, 
+                    userContext.servicoId, 
+                    userContext.servicoNome, 
+                    tomorrow.format('YYYY-MM-DD') // Salva a data de amanhã
+                );
+            }
+            
             return `Não tenho mais vagas para este dia. 😓\nPara o dia seguinte (${dateStr}), tenho estes horários: ${slotsText}.\n\n💡 Escolha um dos horários acima.`;
         }
         
