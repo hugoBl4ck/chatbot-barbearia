@@ -532,12 +532,13 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     if (!docSnap.exists || !docSnap.data().aberto) return [];
 
     const dayConfig = docSnap.data();
+
     const timeToMinutes = (str) => { 
         if (!str) return null; 
         const [h, m] = str.split(':').map(Number); 
         return (h * 60) + (m || 0); 
     };
-    const formatTime = (totalMinutes) => `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
+    const formatTime = (dateObj) => dateObj.format("HH:mm");
 
     // Períodos de trabalho
     const workPeriods = [];
@@ -552,7 +553,7 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
         workPeriods.push({ start: afternoonStart, end: afternoonEnd });
     }
     
-    // Agendamentos existentes
+    // Agendamentos existentes no dia
     const startOfDay = dayDate.startOf('day').toDate();
     const endOfDay = dayDate.endOf('day').toDate();
     const schedulesRef = db.collection(CONFIG.collections.barbearias)
@@ -569,8 +570,8 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
         const data = doc.data();
         const startTime = dayjs(data.DataHoraISO).tz(CONFIG.timezone);
         return { 
-            start: startTime.hour() * 60 + startTime.minute(), 
-            end: startTime.hour() * 60 + startTime.minute() + (data.duracaoMinutos || 30)
+            start: startTime.valueOf(), 
+            end: startTime.add(data.duracaoMinutos || 30, 'minute').valueOf()
         };
     });
 
@@ -580,20 +581,20 @@ async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
 
     for (const period of workPeriods) {
         for (let minuto = period.start; minuto + duracaoMinutos <= period.end; minuto += INTERVALO_MINUTOS) {
-            const slotStartTime = minuto;
-            const slotEndTime = minuto + duracaoMinutos;
-            const slotDate = dayDate.hour(Math.floor(minuto / 60)).minute(minuto % 60);
+            const slotDate = dayDate.hour(Math.floor(minuto / 60)).minute(minuto % 60).second(0);
+            const slotStart = slotDate.valueOf();
+            const slotEnd = slotDate.add(duracaoMinutos, 'minute').valueOf();
 
-            // 1. Verifica se o slot já passou
+            // 1. Ignora se o slot já passou
             if (slotDate.isBefore(currentTime)) continue;
 
-            // 2. Verifica se o slot se choca com algum agendamento
+            // 2. Verifica conflito real (timestamps completos)
             const hasConflict = busySlots.some(busy => 
-                (slotStartTime < busy.end && slotEndTime > busy.start)
+                (slotStart < busy.end && slotEnd > busy.start)
             );
 
             if (!hasConflict) {
-                availableSlots.push(formatTime(minuto));
+                availableSlots.push(formatTime(slotDate));
             }
         }
     }
