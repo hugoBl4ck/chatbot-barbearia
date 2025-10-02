@@ -724,16 +724,16 @@ async function saveAppointment(barbeariaId, personInfo, requestedDate, servico) 
         .collection(CONFIG.collections.schedules);
     
     const newAppointment = {
-        NomeCliente: personInfo.name,
-        TelefoneCliente: personInfo.phone,
-        DataHoraISO: requestedDate.toISOString(),
-        Status: 'Agendado',
-        TimestampAgendamento: new Date().toISOString(),
-        servicoId: servico.id,
-        servicoNome: servico.nome,
-        preco: servico.preco || 0,
-        duracaoMinutos: servico.duracaoMinutos || 30,
-    };
+    NomeCliente: personInfo.name,
+    TelefoneCliente: personInfo.phone,
+    DataHoraISO: dayjs(requestedDate).tz(CONFIG.timezone).toDate(), // ✅ salva como Date no horário certo
+    Status: 'Agendado',
+    TimestampAgendamento: new Date(),
+    servicoId: servico.id,
+    servicoNome: servico.nome,
+    preco: servico.preco || 0,
+    duracaoMinutos: servico.duracaoMinutos || 30,
+};
     
     console.log("💾 Salvando agendamento:", newAppointment);
     await schedulesRef.add(newAppointment);
