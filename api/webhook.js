@@ -33,62 +33,187 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 // =================================================================
-// FUNÇÕES DE CONTEXTO
+// FUNÇÕES DE CONTEXTO OTIMIZADAS
 // =================================================================
 
 async function saveUserContext(barbeariaId, telefone, servicoId, servicoNome, dataOriginal) {
-    const contextRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection('contextos')
-        .doc(telefone);
-    
-    await contextRef.set({
-        servicoId,
-        servicoNome,
-        dataOriginal,
-        dataSugerida: dataOriginal, // Adiciona a data que foi sugerida ao usuário
-        criadoEm: new Date().toISOString(),
-        expirarEm: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+    try {
+        const contextRef = db.collection(CONFIG.collections.barbearias)
+            .doc(barbeariaId)
+            .collection('contextos')
+            .doc(telefone);
+        
+        await contextRef.set({
+            servicoId,
+            servicoNome,
+            dataOriginal,
+            dataSugerida: dataOriginal,
+            criadoEm: new Date().toISOString(),
+            expirarEm: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+        }, { merge: true });
+
+        console.log(`💾 Contexto salvo para ${telefone}: ${servicoNome}`);
+    } catch (error) {
+        console.error(`❌ Erro ao salvar contexto:`, error);
+    }
+}
+
+function clearUserContextAsync(barbeariaId, telefone) {
+    setImmediate(async () => {
+        try {
+            const contextRef = db.collection(CONFIG.collections.barbearias)
+                .doc(barbeariaId)
+                .collection('contextos')
+                .doc(telefone);
+            await contextRef.delete();
+            console.log(`🗑️ Contexto limpo para ${telefone}`);
+        } catch (error) {
+            console.error(`❌ Erro ao limpar contexto:`, error);
+        }
     });
-    
-    console.log(`💾 Contexto salvo para ${telefone}: ${servicoNome} (Data sugerida: ${dataOriginal})`);
 }
 
-async function getUserContext(barbeariaId, telefone) {
-    const contextRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection('contextos')
-        .doc(telefone);
-    
-    const contextSnap = await contextRef.get();
-    
-    if (!contextSnap.exists) {
-        console.log(`📭 Nenhum contexto encontrado para ${telefone}`);
-        return null;
+// =================================================================
+// ENDPOINT PRINCIPAL (trecho otimizado de intent)
+// =================================================================
+
+if (intent === 'agendarHorario') {
+    if (!parsedDateDayjs || !parsedDateDayjs.isValid()) {
+        resultPayload = { 
+            success: false, 
+            message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'hoje às 14h30'." 
+        };
+    } else {
+        if (userContext && userContext.dataSugerida) {
+            const contextDate = dayjs(userContext.dataSugerida);
+            const aiTime = parsedDateDayjs;
+            const today = dayjs().tz(CONFIG.timezone).startOf('day');
+
+            if (aiTime.startOf('day').isSame(today, 'day') && !contextDate.isSame(today, 'day')) {
+                parsedDateDayjs = contextDate
+                    .hour(aiTime.hour())
+                    .minute(aiTime.minute())
+                    .second(0);
+                console.log(`🔄 Usando data do contexto: ${parsedDateDayjs.format('YYYY-MM-DD HH:mm')}`);
+            }
+        }
+        
+        let servicoEncontrado;
+        if (servicoNome) {
+            servicoEncontrado = servicesList.find(s => 
+                s.nome.toLowerCase().includes(servicoNome.toLowerCase()) ||
+                servicoNome.toLowerCase().includes(s.nome.toLowerCase())
+            );
+        }
+        if (!servicoEncontrado && userContext) {
+            servicoEncontrado = servicesList.find(s => s.id === userContext.servicoId);
+            console.log(`🔄 Usando serviço do contexto por ID: ${servicoEncontrado?.nome}`);
+        }
+        if (!servicoEncontrado) {
+            servicoEncontrado = servicesList[0];
+        }
+
+        if (!servicoEncontrado) {
+            resultPayload = { 
+                success: false, 
+                message: `Não encontrei o serviço "${servicoNome}".` 
+            };
+        } else {
+            // não salva contexto aqui
+            resultPayload = await handleScheduling(
+                barbeariaId, personInfo, parsedDateDayjs, servicoEncontrado.id, telefone, servicoEncontrado
+            );
+            if (resultPayload.success) {
+                clearUserContextAsync(barbeariaId, telefone);
+            }
+        }
     }
-    
-    const context = contextSnap.data();
-    const now = new Date();
-    const expiraEm = new Date(context.expirarEm);
-    
-    if (now > expiraEm) {
-        console.log(`⏰ Contexto expirado para ${telefone}`);
-        await contextRef.delete();
-        return null;
-    }
-    
-    console.log(`📬 Contexto recuperado para ${telefone}: ${context.servicoNome} (Data: ${context.dataSugerida})`);
-    return context;
+} else if (intent === 'cancelarHorario') {
+    resultPayload = await handleCancellation(barbeariaId, personInfo);
+    clearUserContextAsync(barbeariaId, telefone);
+} else {
+    resultPayload = { 
+        success: false, 
+        message: 'Não entendi o que você quer fazer. Você quer agendar ou cancelar um horário?' 
+    };
 }
 
-async function clearUserContext(barbeariaId, telefone) {
-    const contextRef = db.collection(CONFIG.collections.barbearias)
-        .doc(barbeariaId)
-        .collection('contextos')
-        .doc(telefone);
+// =================================================================
+// FUNÇÃO DE AGENDAMENTO OTIMIZADA
+// =================================================================
+
+async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, servicoId, telefone, servicoEncontrado = null) {
+    if (!personInfo.name || !personInfo.phone) {
+        return { success: false, message: 'Para agendar, preciso do seu nome e telefone.' };
+    }
     
-    await contextRef.delete();
-    console.log(`🗑️ Contexto limpo para ${telefone}`);
+    const currentTime = dayjs().tz(CONFIG.timezone);
+    if (requestedDateDayjs.isBefore(currentTime)) {
+        return { success: false, message: 'Não é possível agendar no passado.' };
+    }
+
+    let servico = servicoEncontrado;
+    if (!servico) {
+        const servicoRef = db.collection(CONFIG.collections.barbearias)
+            .doc(barbeariaId)
+            .collection(CONFIG.collections.services)
+            .doc(servicoId);
+        const servicoSnap = await servicoRef.get();
+        if (!servicoSnap.exists) {
+            return { success: false, message: 'O serviço selecionado não foi encontrado.' };
+        }
+        servico = { id: servicoSnap.id, ...servicoSnap.data() };
+    }
+    
+    const duracao = servico.duracaoMinutos || 30;
+    console.log(`🔧 Validando agendamento: ${requestedDateDayjs.format('YYYY-MM-DD HH:mm')} (${duracao}min)`);
+
+    const businessHoursCheck = await checkBusinessHours(barbeariaId, requestedDateDayjs, duracao);
+    if (!businessHoursCheck.isOpen) {
+        return { success: false, message: businessHoursCheck.message };
+    }
+
+    const hasConflict = await checkConflicts(barbeariaId, requestedDateDayjs.toDate(), duracao);
+    if (hasConflict) {
+        await saveUserContext(barbeariaId, telefone, servico.id, servico.nome, requestedDateDayjs.format('YYYY-MM-DD'));
+        const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao, telefone);
+        return { success: false, type: 'suggestion', message: suggestions };
+    }
+
+    await saveAppointment(barbeariaId, personInfo, requestedDateDayjs.toDate(), servico);
+    const formattedDateForUser = requestedDateDayjs.format('dddd, DD [de] MMMM [às] HH:mm');
+    return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
+}
+
+// =================================================================
+// FUNÇÃO getAvailableSlots OTIMIZADA
+// =================================================================
+
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos, telefone) {
+    try {
+        const requestedDateDayjs = dayjs(requestedDate);
+        let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
+
+        if (availableSlots.length > 0) {
+            const dateStr = requestedDateDayjs.isSame(dayjs(), 'day') ? 'hoje' : `no dia ${requestedDateDayjs.format('DD/MM')}`;
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `O horário solicitado está ocupado. 😓\nMas tenho estes horários livres ${dateStr}: ${slotsText}.\n\n💡 Escolha um dos horários acima.`;
+        }
+
+        const tomorrow = requestedDateDayjs.add(1, 'day');
+        availableSlots = await findAvailableSlotsForDay(barbeariaId, tomorrow, duracaoMinutos);
+
+        if (availableSlots.length > 0) {
+            const dateStr = tomorrow.format('DD/MM');
+            const slotsText = availableSlots.slice(0, 3).join(', ');
+            return `Não tenho mais vagas para este dia. 😓\nPara o dia seguinte (${dateStr}), tenho estes horários: ${slotsText}.\n\n💡 Escolha um dos horários acima.`;
+        }
+
+        return "Este horário já está ocupado e não encontrei outras vagas próximas. 😓 Por favor, tente outro dia.";
+    } catch (error) {
+        console.error("❌ Erro ao buscar horários disponíveis:", error);
+        return "Este horário está ocupado. Tente outro ou entre em contato conosco.";
+    }
 }
 
 // =================================================================
