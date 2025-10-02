@@ -192,7 +192,9 @@ app.post('/api/webhook', async (request, response) => {
         let { intent, dataHoraISO, servicoNome } = aiResponse.data;
         console.log('🤖 Intent processado:', { intent, dataHoraISO, servicoNome });
 
-        let parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO) : null;
+        // CORREÇÃO APLICADA AQUI: Adicionado .tz() para garantir o fuso correto
+        let parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
+        
         const personInfo = { name: nome, phone: telefone };
 
         let resultPayload;
