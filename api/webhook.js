@@ -257,7 +257,8 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
     // Verificar conflitos
     const hasConflict = await checkConflicts(barbeariaId, requestedDateDayjs.toDate(), duracao);
     if (hasConflict) {
-        const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao);
+        // PASSA O NOME DO SERVIÇO PARA A FUNÇÃO DE SUGESTÕES
+        const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao, servico.nome);
         return { success: false, type: 'suggestion', message: suggestions };
     }
 
@@ -349,7 +350,7 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     }
 }
 
-async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos, servicoNome = null) {
     try {
         // Usa o objeto Date recebido, que já está correto
         const requestedDateDayjs = dayjs(requestedDate);
@@ -364,7 +365,10 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
         if (availableSlots.length > 0) {
             const dateStr = requestedDateDayjs.isSame(dayjs(), 'day') ? 'hoje' : `no dia ${requestedDateDayjs.format('DD/MM')}`;
             const slotsText = availableSlots.slice(0, 3).join(', ');
-            return `O horário solicitado está ocupado. 😔\nMas tenho estes horários livres ${dateStr}: ${slotsText}. Algum desses funciona?`;
+            
+            // IMPORTANTE: Pedir para repetir o serviço desejado
+            const servicoMsg = servicoNome ? ` para ${servicoNome}` : '';
+            return `O horário solicitado está ocupado. 😓\nMas tenho estes horários livres ${dateStr}: ${slotsText}.\n\n💡 Para confirmar, me diga: "Quero agendar${servicoMsg} às [HORÁRIO]"`;
         }
         
         // 2. Se não encontrou, tenta para o DIA SEGUINTE
@@ -374,11 +378,14 @@ async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
         if (availableSlots.length > 0) {
             const dateStr = tomorrow.format('DD/MM');
             const slotsText = availableSlots.slice(0, 3).join(', ');
-            return `Não tenho mais vagas para este dia. 😔\nPara o dia seguinte (${dateStr}), tenho estes horários: ${slotsText}. Quer marcar um desses?`;
+            
+            // IMPORTANTE: Pedir para repetir o serviço desejado
+            const servicoMsg = servicoNome ? ` para ${servicoNome}` : '';
+            return `Não tenho mais vagas para este dia. 😓\nPara o dia seguinte (${dateStr}), tenho estes horários: ${slotsText}.\n\n💡 Para confirmar, me diga: "Quero agendar${servicoMsg} às [HORÁRIO]"`;
         }
         
         // 3. Se ainda não encontrou, desiste educadamente.
-        return "Este horário já está ocupado e não encontrei outras vagas próximas. 😔 Por favor, tente outro dia.";
+        return "Este horário já está ocupado e não encontrei outras vagas próximas. 😓 Por favor, tente outro dia.";
         
     } catch (error) {
         console.error("❌ Erro ao buscar horários disponíveis:", error);
