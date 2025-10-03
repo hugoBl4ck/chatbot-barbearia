@@ -352,7 +352,7 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     return { isOpen: false, message: `${horarioMsg}. O serviço solicitado (${duracaoMinutos} minutos) não se encaixa nesse período.` };
 }
 
-async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos, telefone) {
+async function getAvailableSlots(barbeariaId, requestedDate, duracaoMinutos) {
     try {
         const requestedDateDayjs = dayjs(requestedDate).tz(CONFIG.timezone);
         let availableSlots = await findAvailableSlotsForDay(barbeariaId, requestedDateDayjs, duracaoMinutos);
