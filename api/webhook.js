@@ -120,33 +120,51 @@ async function getIntentWithGemini(text, servicesList) {
     if (!CONFIG.geminiApiKey) {
         return { success: false, message: "Chave da API do Gemini não configurada." };
     }
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${CONFIG.geminiApiKey}`;
+
+    // CORREÇÃO: Usando o modelo 'gemini-pro', que é o padrão estável e compatível.
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${CONFIG.geminiApiKey}`;
+
     const serviceNames = servicesList.map(s => `"${s.nome}"`).join(', ');
     const currentLocalTime = dayjs().tz(CONFIG.timezone).format('dddd, DD/MM/YYYY HH:mm');
     const systemPrompt = `Você é um assistente de agendamento para uma barbearia no Brasil (fuso horário: ${CONFIG.timezone}). A data/hora atual de referência é ${currentLocalTime}. Serviços disponíveis: [${serviceNames}]. Sua tarefa é analisar a mensagem do usuário e retornar APENAS um objeto JSON válido com a estrutura: {"intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss-03:00" | null, "servicoNome": "Nome Exato do Serviço" | null}.`;
+    
     const requestBody = {
         contents: [{ parts: [{ text: systemPrompt + "\n\nUsuário: " + text }] }],
         generationConfig: {
-            response_mime_type: "application/json",
+            // NOTA: O modelo gemini-pro não suporta a saída direta em JSON via 'response_mime_type'.
+            // A IA ainda seguirá a instrução do prompt para gerar apenas o JSON.
             temperature: 0.1,
             maxOutputTokens: 2048,
         }
     };
+
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestBody)
         });
+
         if (!response.ok) {
             const errorBody = await response.json();
             console.error("❌ API Gemini falhou:", JSON.stringify(errorBody, null, 2));
             throw new Error(`API Gemini falhou com status ${response.status}`);
         }
+
         const data = await response.json();
+        
+        // A resposta do gemini-pro vem um pouco diferente, precisamos extrair o texto
         const responseText = data.candidates[0].content.parts[0].text;
         console.log("🔍 Resposta bruta da IA (Gemini):", responseText);
-        return { success: true, data: JSON.parse(responseText) };
+
+        // Como o gemini-pro não força JSON, precisamos garantir que o extraímos do texto.
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            throw new Error("A resposta da IA (Gemini) não continha um JSON válido.");
+        }
+
+        return { success: true, data: JSON.parse(jsonMatch[0]) };
+
     } catch (error) {
         console.error("❌ Erro ao chamar a API Gemini:", error);
         return { success: false, message: "Não consegui falar com o assistente de IA no momento." };
