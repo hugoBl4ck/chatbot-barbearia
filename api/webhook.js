@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK V4.3 MELHORADO - SEM CACHE, COM CONTEXTO E GEMINI
+// WEBHOOK V4.3 MELHORADO - SEM CACHE, COM CONTEXTO E PERPLEXITY
 // =================================================================
 const express = require('express');
 const admin = require('firebase-admin');
@@ -17,7 +17,7 @@ app.use(express.json());
 
 const CONFIG = {
     firebaseCreds: JSON.parse(process.env.FIREBASE_CREDENTIALS || '{}'),
-    geminiApiKey: process.env.GEMINI_API_TYPEBOT, // Usando Gemini
+    perplexityApiKey: process.env.PERPLEXITY_API_KEY, // Revertido para Perplexity
     timezone: 'America/Sao_Paulo',
     collections: { 
         barbearias: 'barbearias', 
@@ -32,10 +32,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-
-// =================================================================
-// MELHORIA: FUNÇÕES DE CONTEXTO ADICIONADAS
-// =================================================================
+// Funções de Contexto
 async function saveUserContext(barbeariaId, telefone, servicoId, servicoNome, dataOriginalISO) {
     try {
         const contextRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection('contextos').doc(telefone);
@@ -75,61 +72,60 @@ function clearUserContextAsync(barbeariaId, telefone) {
     });
 }
 
-
-// =================================================================
-// MELHORIA: IA TROCADA PARA GEMINI
-// =================================================================
-async function getIntentWithGemini(text, servicesList) {
-    if (!CONFIG.geminiApiKey) {
-        return { success: false, message: "Chave da API do Gemini não configurada." };
+// Função de IA Revertida para Perplexity
+async function getIntentWithPerplexity(text, servicesList) {
+    if (!CONFIG.perplexityApiKey) {
+        console.error("❌ Chave da API do Perplexity não configurada.");
+        return { success: false, message: "O serviço de IA não está configurado." };
     }
-    const modelName = 'gemini-pro-latest';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${CONFIG.geminiApiKey}`;
-    const serviceNames = servicesList.map(s => `"${s.nome}"`).join(', ');
-    const currentLocalTime = dayjs().tz(CONFIG.timezone).format('dddd, DD/MM/YYYY HH:mm');
-    const systemPrompt = `Você é um assistente de agendamento para uma barbearia no Brasil (fuso horário: ${CONFIG.timezone}). A data/hora atual de referência é ${currentLocalTime}. Serviços disponíveis: [${serviceNames}]. Sua tarefa é analisar a mensagem do usuário e retornar APENAS um objeto JSON válido com a estrutura: {"intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss-03:00" | null, "servicoNome": "Nome Exato do Serviço" | null}.`;
     
-    const requestBody = {
-        contents: [{ parts: [{ text: systemPrompt + "\n\nUsuário: " + text }] }],
-        generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 2048,
-        }
-    };
-
     try {
-        const response = await fetch(url, {
+        const serviceNames = servicesList.map(s => `"${s.nome}"`).join(', ');
+        const currentLocalTime = dayjs().tz(CONFIG.timezone).format('dddd, DD/MM/YYYY HH:mm');
+        
+        const systemPrompt = `Você é um assistente de agendamento para uma barbearia no Brasil (fuso horário: America/Sao_Paulo). A data/hora atual de referência é ${currentLocalTime}. Serviços disponíveis: [${serviceNames}]. Sua tarefa é analisar a mensagem do usuário e retornar APENAS um objeto JSON válido com a estrutura: {"intent": "agendarHorario" | "cancelarHorario" | "informacao", "dataHoraISO": "YYYY-MM-DDTHH:mm:ss-03:00" | null, "servicoNome": "Nome Exato do Serviço" | null}. IMPORTANTE: - Para agendamentos, SEMPRE inclua dataHoraISO no formato ISO com timezone brasileiro (-03:00) - Se o usuário não especificar um serviço, use null em servicoNome - Se algo não for claro, retorne null nos campos correspondentes.`;
+        
+        const response = await fetch("https://api.perplexity.ai/chat/completions", {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
+            headers: { 
+                'Content-Type': 'application/json', 
+                'Authorization': `Bearer ${CONFIG.perplexityApiKey}` 
+            },
+            body: JSON.stringify({
+                model: 'sonar-small-online', // Usando um modelo talvez mais rápido
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: text }
+                ],
+                max_tokens: 200,
+                temperature: 0.1
+            })
         });
 
         if (!response.ok) {
-            const errorBody = await response.json();
-            throw new Error(`API Gemini falhou: ${JSON.stringify(errorBody)}`);
+            throw new Error(`API Perplexity falhou com status ${response.status}`);
         }
 
         const data = await response.json();
-        const responseText = data.candidates[0].content.parts[0].text;
-        console.log("🔍 Resposta bruta da IA (Gemini):", responseText);
-
+        const responseText = data.choices[0].message.content;
+        console.log("🔍 Resposta bruta da IA (Perplexity):", responseText);
+        
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
-            throw new Error("A resposta da IA (Gemini) não continha um JSON válido.");
+            throw new Error("A resposta da IA não continha JSON.");
         }
-
-        return { success: true, data: JSON.parse(jsonMatch[0]) };
-
+        
+        const parsedResponse = JSON.parse(jsonMatch[0]);
+        return { success: true, data: parsedResponse };
+        
     } catch (error) {
-        console.error("❌ Erro ao chamar a API Gemini:", error);
-        return { success: false, message: "Não consegui falar com o assistente de IA no momento." };
+        console.error("❌ Erro ao chamar a API Perplexity:", error);
+        return { success: false, message: "Não consegui entender sua solicitação no momento." };
     }
 }
 
 
-// =================================================================
-// ENDPOINT PRINCIPAL COM MELHORIAS DE FLUXO
-// =================================================================
+// Endpoint Principal
 app.post("/api/webhook", async (request, response) => {
     const { nome, telefone, data_hora_texto, barbeariaId } = request.body;
     console.log("\n📄 === NOVO REQUEST WEBHOOK ===\n", JSON.stringify(request.body, null, 2));
@@ -141,22 +137,19 @@ app.post("/api/webhook", async (request, response) => {
 
         const barbeariaRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId);
         const barbeariaSnap = await barbeariaRef.get();
-        
         if (!barbeariaSnap.exists) {
             return response.status(200).json({ status: 'error', message: 'Barbearia não encontrada.' });
         }
 
         const servicesSnapshot = await barbeariaRef.collection(CONFIG.collections.services).where('ativo', '==', true).get();
         const servicesList = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        
         if (servicesList.length === 0) {
             return response.status(200).json({ status: 'error', message: 'Nenhum serviço configurado.' });
         }
 
-        // MELHORIA: Execução paralela
         const [userContext, aiResult] = await Promise.all([
             getUserContext(barbeariaId, telefone),
-            getIntentWithGemini(data_hora_texto, servicesList)
+            getIntentWithPerplexity(data_hora_texto, servicesList) // Revertido para Perplexity
         ]);
 
         if (!aiResult.success) {
@@ -166,15 +159,14 @@ app.post("/api/webhook", async (request, response) => {
         let { intent, dataHoraISO, servicoNome } = aiResult.data;
         console.log("🤖 Intent processado:", { intent, dataHoraISO, servicoNome });
         
-        const parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
+        let parsedDateDayjs = dataHoraISO ? dayjs(dataHoraISO).tz(CONFIG.timezone) : null;
         const personInfo = { name: nome, phone: telefone };
         let resultPayload;
 
         if (intent === 'agendarHorario') {
             if (!parsedDateDayjs || !parsedDateDayjs.isValid()) {
-                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h' ou 'hoje às 14h30'." };
+                resultPayload = { success: false, message: "Não consegui entender a data e hora. Tente algo como 'amanhã às 16h'." };
             } else {
-                 // MELHORIA: Lógica de contexto para data/hora
                 if (userContext && userContext.dataSugerida) {
                     const contextDate = dayjs(userContext.dataSugerida).tz(CONFIG.timezone, true);
                     const aiTime = parsedDateDayjs;
@@ -185,12 +177,9 @@ app.post("/api/webhook", async (request, response) => {
                 }
 
                 let servicoEncontrado = servicesList.find(s => servicoNome && (s.nome.toLowerCase().includes(servicoNome.toLowerCase()) || servicoNome.toLowerCase().includes(s.nome.toLowerCase())));
-                
-                // MELHORIA: Lógica de contexto para serviço
                 if (!servicoEncontrado && userContext) {
                     servicoEncontrado = servicesList.find(s => s.id === userContext.servicoId);
                 }
-
                 if (!servicoEncontrado) {
                     servicoEncontrado = servicesList[0];
                 }
@@ -206,9 +195,9 @@ app.post("/api/webhook", async (request, response) => {
             }
         } else if (intent === 'cancelarHorario') {
             resultPayload = await handleCancellation(barbeariaId, personInfo);
-            clearUserContextAsync(barbeariaId, telefone); // MELHORIA: Limpa contexto no cancelamento
+            clearUserContextAsync(barbeariaId, telefone);
         } else {
-            resultPayload = { success: false, message: 'Não entendi o que você quer fazer. Você quer agendar ou cancelar um horário?' };
+            resultPayload = { success: false, message: 'Não entendi o que você quer fazer.' };
         }
         
         const responseData = { status: resultPayload.success ? 'success' : 'error', message: resultPayload.message, type: resultPayload.type || null };
@@ -221,7 +210,6 @@ app.post("/api/webhook", async (request, response) => {
     }
 });
     
-// handleScheduling adaptado para receber os novos parâmetros
 async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, servicoId, telefone, servicoEncontrado = null) {
     if (!personInfo.name || !personInfo.phone) {
         return { success: false, message: 'Para agendar, preciso do seu nome e telefone.' };
@@ -252,7 +240,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
 
     const hasConflict = await checkConflicts(barbeariaId, requestedDateDayjs.toDate(), duracao);
     if (hasConflict) {
-        // MELHORIA: Salva contexto apenas no conflito
         await saveUserContext(barbeariaId, telefone, servico.id, servico.nome, requestedDateDayjs.toISOString());
         const suggestions = await getAvailableSlots(barbeariaId, requestedDateDayjs.toDate(), duracao);
         return { success: false, type: 'suggestion', message: suggestions };
@@ -262,8 +249,6 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
     const formattedDateForUser = requestedDateDayjs.format('dddd, DD [de] MMMM [às] HH:mm');
     return { success: true, message: `Perfeito, ${personInfo.name}! Seu agendamento de ${servico.nome} foi confirmado para ${formattedDateForUser}.` };
 }
-
-// O restante das funções permanece como no seu arquivo original, pois não precisavam de alteração
 
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const dayOfWeek = dateDayjs.day();
@@ -289,20 +274,10 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const afternoonStart = timeToMinutes(dayConfig.InicioTarde);
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
 
-    console.log("🕐 === VERIFICAÇÃO DE HORÁRIO DE FUNCIONAMENTO ===");
-    console.log(`📅 Data/hora solicitada: ${dateDayjs.format('YYYY-MM-DD HH:mm')} (${duracaoMinutos}min)`);
-    console.log(`⏰ Horário solicitado (minutos): ${requestedStartMinutes} até ${requestedEndMinutes}`);
-    console.log(`🌅 Manhã: ${morningStart} até ${morningEnd} (${dayConfig.InicioManha} às ${dayConfig.FimManha})`);
-    console.log(`🌆 Tarde: ${afternoonStart} até ${afternoonEnd} (${dayConfig.InicioTarde} às ${dayConfig.FimTarde})`);
-
     const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
     const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
-    
-    console.log(`✅ Cabe na manhã? ${fitsInMorning}`);
-    console.log(`✅ Cabe na tarde? ${fitsInAfternoon}`);
 
     if (fitsInMorning || fitsInAfternoon) {
-        console.log("🎉 APROVADO: Horário está dentro do funcionamento!");
         return { isOpen: true };
     } else {
         let horarioMsg = "Nosso horário de funcionamento é";
@@ -314,7 +289,6 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
         else { horarioMsg = "Não há horários de funcionamento configurados"; }
         
         const msg = `${horarioMsg}. O serviço solicitado (${duracaoMinutos} minutos) não se encaixa nesse período.`;
-        console.log(`❌ REJEITADO: ${msg}`);
         return { isOpen: false, message: msg };
     }
 }
