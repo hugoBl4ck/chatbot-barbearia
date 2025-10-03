@@ -92,7 +92,7 @@ async function getIntentWithPerplexity(text, servicesList) {
                 'Authorization': `Bearer ${CONFIG.perplexityApiKey}` 
             },
             body: JSON.stringify({
-                model: 'sonar-small-online', // Usando um modelo talvez mais rápido
+                model: 'sonar', // Usando um modelo talvez mais rápido
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: text }
