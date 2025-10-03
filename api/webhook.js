@@ -1,5 +1,5 @@
 // =================================================================
-// WEBHOOK OTIMIZADO V7.1 - CÓDIGO COMPLETO E LIMPO (CACHE TTL)
+// WEBHOOK OTIMIZADO V7.2 - FINAL COM MODELO GEMINI CORRETO
 // =================================================================
 const express = require('express');
 const admin = require('firebase-admin');
@@ -120,9 +120,10 @@ async function getIntentWithGemini(text, servicesList) {
     if (!CONFIG.geminiApiKey) {
         return { success: false, message: "Chave da API do Gemini não configurada." };
     }
-
-    // CORREÇÃO: Usando o modelo 'gemini-pro', que é o padrão estável e compatível.
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${CONFIG.geminiApiKey}`;
+    
+    // CORREÇÃO FINAL: Usando o modelo estável 'gemini-pro-latest'
+    const modelName = 'gemini-pro-latest';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${CONFIG.geminiApiKey}`;
 
     const serviceNames = servicesList.map(s => `"${s.nome}"`).join(', ');
     const currentLocalTime = dayjs().tz(CONFIG.timezone).format('dddd, DD/MM/YYYY HH:mm');
@@ -131,8 +132,6 @@ async function getIntentWithGemini(text, servicesList) {
     const requestBody = {
         contents: [{ parts: [{ text: systemPrompt + "\n\nUsuário: " + text }] }],
         generationConfig: {
-            // NOTA: O modelo gemini-pro não suporta a saída direta em JSON via 'response_mime_type'.
-            // A IA ainda seguirá a instrução do prompt para gerar apenas o JSON.
             temperature: 0.1,
             maxOutputTokens: 2048,
         }
@@ -152,12 +151,9 @@ async function getIntentWithGemini(text, servicesList) {
         }
 
         const data = await response.json();
-        
-        // A resposta do gemini-pro vem um pouco diferente, precisamos extrair o texto
         const responseText = data.candidates[0].content.parts[0].text;
         console.log("🔍 Resposta bruta da IA (Gemini):", responseText);
 
-        // Como o gemini-pro não força JSON, precisamos garantir que o extraímos do texto.
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
             throw new Error("A resposta da IA (Gemini) não continha um JSON válido.");
