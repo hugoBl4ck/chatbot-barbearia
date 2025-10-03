@@ -1,10 +1,6 @@
-// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-// WEBHOOK OTIMIZADO V6.2 - CÓDIGO COMPLETO E LIMPO
-// - Cache dinâmico multi-tenant
-// - IA com Google Gemini (gemini-1.5-flash)
-// - Execução paralela de I/O
-// - Lógica de data/hora preservada (ISO Strings)
-// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+// =================================================================
+// WEBHOOK OTIMIZADO V7.1 - CÓDIGO COMPLETO E LIMPO (CACHE TTL)
+// =================================================================
 const express = require('express');
 const admin = require('firebase-admin');
 const dayjs = require('dayjs');
@@ -28,7 +24,8 @@ const CONFIG = {
         schedules: 'agendamentos', 
         config: 'horarios', 
         services: 'servicos' 
-    }
+    },
+    cacheTTL: 15 * 60 * 1000 // 15 minutos
 };
 
 if (!admin.apps.length) {
@@ -41,37 +38,43 @@ const businessHoursCache = new Map();
 
 async function cacheBarbeariaData(barbeariaId) {
     try {
-        console.log(`Caching data for barbeariaId: ${barbeariaId}...`);
+        console.log(`(Re)Caching data for barbeariaId: ${barbeariaId}...`);
         const barbeariaRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId);
+        const now = Date.now();
 
         const servicesSnapshot = await barbeariaRef.collection(CONFIG.collections.services).where('ativo', '==', true).get();
         const servicesList = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        servicesCache.set(barbeariaId, servicesList);
+        servicesCache.set(barbeariaId, { timestamp: now, data: servicesList });
         console.log(`✅ Serviços em cache para ${barbeariaId}: ${servicesList.length} itens.`);
 
         const hoursMap = new Map();
         for (let i = 0; i < 7; i++) {
             const docSnap = await barbeariaRef.collection(CONFIG.collections.config).doc(String(i)).get();
-            if (docSnap.exists) {
-                hoursMap.set(String(i), docSnap.data());
-            }
+            if (docSnap.exists) hoursMap.set(String(i), docSnap.data());
         }
-        businessHoursCache.set(barbeariaId, hoursMap);
+        businessHoursCache.set(barbeariaId, { timestamp: now, data: hoursMap });
         console.log(`✅ Horários em cache para ${barbeariaId}: ${hoursMap.size} dias.`);
         
         return { success: true };
     } catch (error) {
         console.error(`❌ Falha ao carregar cache para barbearia ${barbeariaId}:`, error);
-        return { success: false, message: `Não foi possível carregar as configurações para a barbearia ${barbeariaId}.`};
+        return { success: false, message: `Não foi possível carregar as configurações para a barbearia.`};
     }
 }
 
+function isCacheValid(cacheEntry) {
+    if (!cacheEntry) return false;
+    return (Date.now() - cacheEntry.timestamp) < CONFIG.cacheTTL;
+}
+
 async function getServices(barbeariaId) {
-    if (servicesCache.has(barbeariaId)) {
-        return servicesCache.get(barbeariaId);
+    const cacheEntry = servicesCache.get(barbeariaId);
+    if (isCacheValid(cacheEntry)) {
+        return cacheEntry.data;
     }
+    console.log(`Cache de serviços para ${barbeariaId} expirado ou inexistente. Buscando novamente.`);
     await cacheBarbeariaData(barbeariaId);
-    return servicesCache.get(barbeariaId) || [];
+    return servicesCache.get(barbeariaId)?.data || [];
 }
 
 async function saveUserContext(barbeariaId, telefone, servicoId, servicoNome, dataOriginalISO) {
@@ -90,14 +93,12 @@ async function getUserContext(barbeariaId, telefone) {
     try {
         const contextRef = db.collection(CONFIG.collections.barbearias).doc(barbeariaId).collection('contextos').doc(telefone);
         const contextSnap = await contextRef.get();
-        if (!contextSnap.exists) { console.log(`📭 Nenhum contexto encontrado para ${telefone}`); return null; }
+        if (!contextSnap.exists) { return null; }
         const context = contextSnap.data();
         if (new Date() > new Date(context.expirarEm)) {
-            console.log(`⏰ Contexto expirado para ${telefone}`);
             await contextRef.delete();
             return null;
         }
-        console.log(`📬 Contexto recuperado para ${telefone}: ${context.servicoNome}`);
         return context;
     } catch (err) {
         console.error('❌ Erro ao recuperar contexto:', err);
@@ -160,7 +161,7 @@ app.post('/api/webhook', async (request, response) => {
         if (!barbeariaId) {
              return response.status(400).json({ status: 'error', message: 'barbeariaId é obrigatório.' });
         }
-
+        
         const servicesList = await getServices(barbeariaId);
         if (!servicesList || servicesList.length === 0) {
              return response.status(200).json({ status: 'error', message: 'Nenhum serviço configurado ou barbearia inválida.' });
@@ -258,16 +259,20 @@ async function handleScheduling(barbeariaId, personInfo, requestedDateDayjs, ser
 }
 
 async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
-    let hoursByDay = businessHoursCache.get(barbeariaId);
-    if (!hoursByDay) {
+    let cacheEntry = businessHoursCache.get(barbeariaId);
+    if (!isCacheValid(cacheEntry)) {
+        console.log(`Cache de horários para ${barbeariaId} expirado ou inexistente. Buscando novamente.`);
         await cacheBarbeariaData(barbeariaId);
-        hoursByDay = businessHoursCache.get(barbeariaId);
-        if (!hoursByDay) return { isOpen: false, message: 'Configurações de horário não encontradas.' };
+        cacheEntry = businessHoursCache.get(barbeariaId);
+        if (!cacheEntry) return { isOpen: false, message: 'Configurações de horário não encontradas.' };
     }
+    
+    const hoursByDay = cacheEntry.data;
     const dayConfig = hoursByDay.get(String(dateDayjs.day()));
     if (!dayConfig || !dayConfig.aberto) {
         return { isOpen: false, message: `Desculpe, não funcionamos neste dia da semana.` };
     }
+    
     const timeToMinutes = (timeStr) => {
         if (!timeStr) return null; const [h, m] = timeStr.split(':').map(Number); return (h * 60) + (m || 0);
     };
@@ -279,7 +284,9 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
     const afternoonEnd = timeToMinutes(dayConfig.FimTarde);
     const fitsInMorning = (morningStart !== null && morningEnd !== null) && (requestedStartMinutes >= morningStart && requestedEndMinutes <= morningEnd);
     const fitsInAfternoon = (afternoonStart !== null && afternoonEnd !== null) && (requestedStartMinutes >= afternoonStart && requestedEndMinutes <= afternoonEnd);
+
     if (fitsInMorning || fitsInAfternoon) return { isOpen: true };
+
     let horarioMsg = "Nosso horário de funcionamento é";
     const periods = [];
     if (dayConfig.InicioManha && dayConfig.FimManha) periods.push(`das ${dayConfig.InicioManha} às ${dayConfig.FimManha}`);
@@ -292,12 +299,14 @@ async function checkBusinessHours(barbeariaId, dateDayjs, duracaoMinutos) {
 
 async function findAvailableSlotsForDay(barbeariaId, dayDate, duracaoMinutos) {
     const dayDateTz = dayjs(dayDate).tz(CONFIG.timezone);
-    let hoursByDay = businessHoursCache.get(barbeariaId);
-    if (!hoursByDay) {
+    let cacheEntry = businessHoursCache.get(barbeariaId);
+    if (!isCacheValid(cacheEntry)) {
+        console.log(`Cache de horários para ${barbeariaId} expirado ou inexistente. Buscando novamente.`);
         await cacheBarbeariaData(barbeariaId);
-        hoursByDay = businessHoursCache.get(barbeariaId);
-        if (!hoursByDay) return [];
+        cacheEntry = businessHoursCache.get(barbeariaId);
+        if (!cacheEntry) return [];
     }
+    const hoursByDay = cacheEntry.data;
     const dayConfig = hoursByDay.get(String(dayDateTz.day()));
     if (!dayConfig || !dayConfig.aberto) return [];
     
